@@ -9,6 +9,7 @@
 import Foundation
 import Observation
 import Combine
+import SwiftUI
 
 public enum AppActiveView {
     case camera
@@ -21,10 +22,14 @@ public enum AppActiveView {
 @Observable
 @MainActor
 public final class IntakeViewModel {
+    // Endpoints pointing to your live serverless Cloudflare Workers
+    private let signerUrl = URL(string: "https://r2-signer.tallyup-invoices.workers.dev")!
+    private let analyzerUrl = URL(string: "https://ai-analyzer.tallyup-invoices.workers.dev")!
+    
     // Current UI view state
     public var activeView: AppActiveView = .camera
     
-    // Core database collections
+    // Core database collections loaded dynamically from D1
     public var savedEvents: [FoodEvent] = []
     public var savedItems: [UUID: [MealItem]] = [:]
     public var savedEstimates: [UUID: EstimateVersion] = [:]
@@ -39,6 +44,7 @@ public final class IntakeViewModel {
     public var activeQuestion: PortionQuestion?
     public var selectedCorrectionOption: String = ""
     public var analysisStage: Int = 0
+    public var processingError: String? = nil
     
     // Settings toggles
     public var voiceAnnotationEnabled: Bool = true
@@ -48,152 +54,56 @@ public final class IntakeViewModel {
     public var todayRollup = DailyRollup(
         userId: "usr_sidharth_902",
         date: Date(),
-        caloriesLow: 1100,
-        caloriesHigh: 1450,
-        caloriesLikely: 1280,
-        proteinG: 42,
-        carbsG: 190,
-        fatG: 45,
-        eventsCount: 2,
-        photoLogsCount: 2,
+        caloriesLow: 0,
+        caloriesHigh: 0,
+        caloriesLikely: 0,
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        eventsCount: 0,
+        photoLogsCount: 0,
         noImageLogsCount: 0,
-        confidenceScore: 91
+        confidenceScore: 100
     )
     
     public init() {
-        initializeMockTelemetry()
+        // Initial sync of rollups and history from Cloudflare D1
+        Task {
+            await fetchTelemetry()
+        }
     }
     
-    // MARK: - Ingestion Transitions
+    // MARK: - Ingestion Pipeline (Cloudflare Edge Worker + Gemini Files API)
     
     public func triggerCapture(flowId: String) {
+        processingError = nil
+        activeView = .analyzing
+        analysisStage = 1 // Media ingestion & upload
+        
         let eventId = UUID()
         let userId = "usr_sidharth_902"
         let now = Date()
         
+        // Define default mock meal visual properties to fetch and upload natively to D1/R2
+        var visualUrlString = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600"
+        var noteText: String? = nil
         var captureType: CaptureType = .photo
-        var textNote: String? = nil
-        var imageUrl: URL? = nil
-        
-        var mockItems: [MealItem] = []
-        var mockEstimate: EstimateVersion?
-        var mockQuestion: PortionQuestion?
         
         switch flowId {
         case "kerala_lunch":
+            visualUrlString = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600"
+            noteText = voiceAnnotationEnabled ? "Lunch with Rice, fish curry, thoran, pappadam" : nil
             captureType = voiceAnnotationEnabled ? .photoVoice : .photo
-            textNote = "Amma's lunch: matta rice, fish curry, cabbage thoran, pappadam"
-            imageUrl = URL(string: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=1000")
-            
-            mockItems = [
-                MealItem(eventId: eventId, nameDetected: "Kerala Matta Rice", nameNormalized: "Cooked matta rice", portionUnit: "cup", portionValue: 1.5, estimatedGramsLikely: 300, confidence: "High"),
-                MealItem(eventId: eventId, nameDetected: "Fish Curry (Kerala style)", nameNormalized: "Fish curry with coconut gravy", portionUnit: "bowl", portionValue: 1.0, estimatedGramsLikely: 180, confidence: "Medium"),
-                MealItem(eventId: eventId, nameDetected: "Cabbage Thoran", nameNormalized: "Cabbage thoran with shredded coconut", portionUnit: "bowl", portionValue: 0.5, estimatedGramsLikely: 65, confidence: "High"),
-                MealItem(eventId: eventId, nameDetected: "Pappadam", nameNormalized: "Fried papadum", portionUnit: "piece", portionValue: 1.0, estimatedGramsLikely: 12, confidence: "High")
-            ]
-            
-            mockEstimate = EstimateVersion(
-                eventId: eventId,
-                modelProvider: "openai",
-                modelName: "gpt-4o-vision-2024-11-20",
-                promptVersion: "v1.4",
-                nutritionEngineVersion: "v2.0",
-                caloriesLow: 780,
-                caloriesHigh: 980,
-                caloriesLikely: 870,
-                proteinG: 34,
-                carbsG: 110,
-                fatG: 30,
-                confidenceScore: 82,
-                uncertaintyReasons: ["depth of rice on plate", "cooking oil / coconut content in curry gravy"]
-            )
-            
-            mockQuestion = PortionQuestion(
-                id: "q_rice_qty",
-                question: "How many cups of Matta Rice did you serve?",
-                options: ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"],
-                defaultOption: "1.5 cups",
-                correctionType: "portion",
-                uiType: "unit_slider"
-            )
-            
         case "banana_chips":
+            visualUrlString = "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=600"
+            noteText = "Snacking on packaged chips at desk"
             captureType = .photo
-            textNote = "Snacking at desk"
-            imageUrl = URL(string: "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=1000")
-            
-            mockItems = [
-                MealItem(eventId: eventId, nameDetected: "Kerala Banana Chips (Packaged)", nameNormalized: "Banana chips fried in coconut oil", portionUnit: "packet", portionValue: 1.0, estimatedGramsLikely: 65, confidence: "High")
-            ]
-            
-            mockEstimate = EstimateVersion(
-                eventId: eventId,
-                modelProvider: "openai",
-                modelName: "gpt-4o-ocr-2024-11-20",
-                promptVersion: "v1.4",
-                nutritionEngineVersion: "v2.0",
-                caloriesLow: 340,
-                caloriesHigh: 340,
-                caloriesLikely: 340,
-                proteinG: 2,
-                carbsG: 38,
-                fatG: 20,
-                confidenceScore: 98,
-                uncertaintyReasons: []
-            )
-            
-            mockQuestion = PortionQuestion(
-                id: "q_chips_fraction",
-                question: "Did you eat the entire packet?",
-                options: ["Half packet", "Whole packet", "Two packets"],
-                defaultOption: "Whole packet",
-                correctionType: "portion",
-                uiType: "fraction_picker"
-            )
-            
         case "dosa_backfill":
+            visualUrlString = "https://images.unsplash.com/photo-1668236543090-82eba5ee5976?w=600"
+            noteText = "Dosas with coconut chutney, filter coffee"
             captureType = .backfillVoice
-            textNote = "Voice backfill: Had two dosas with coconut chutney and sambar, plus filter coffee"
-            imageUrl = nil
-            
-            mockItems = [
-                MealItem(eventId: eventId, nameDetected: "Dosa", nameNormalized: "Standard fermented rice dosa", portionUnit: "piece", portionValue: 2.0, estimatedGramsLikely: 140, confidence: "Low"),
-                MealItem(eventId: eventId, nameDetected: "Coconut Chutney", nameNormalized: "Grated coconut chutney", portionUnit: "bowl", portionValue: 0.5, estimatedGramsLikely: 50, confidence: "Low"),
-                MealItem(eventId: eventId, nameDetected: "Sambar", nameNormalized: "Lentil vegetable sambar", portionUnit: "bowl", portionValue: 0.5, estimatedGramsLikely: 120, confidence: "Low"),
-                MealItem(eventId: eventId, nameDetected: "South Indian Filter Coffee", nameNormalized: "Filter coffee with whole milk", portionUnit: "tumbler", portionValue: 1.0, estimatedGramsLikely: 135, confidence: "Low")
-            ]
-            
-            mockEstimate = EstimateVersion(
-                eventId: eventId,
-                modelProvider: "openai",
-                modelName: "gpt-4o-text-2024-11-20",
-                promptVersion: "v1.4",
-                nutritionEngineVersion: "v2.0",
-                caloriesLow: 430,
-                caloriesHigh: 670,
-                caloriesLikely: 540,
-                proteinG: 12,
-                carbsG: 82,
-                fatG: 19,
-                confidenceScore: 55,
-                uncertaintyReasons: [
-                    "no photo to visually verify portion sizes",
-                    "oil / ghee brushing amount on dosa is unknown",
-                    "sugar concentration in coffee is unquantified"
-                ]
-            )
-            
-            mockQuestion = PortionQuestion(
-                id: "q_dosa_ghee",
-                question: "Were the dosas prepared with Ghee/Butter?",
-                options: ["Standard/Dry dosa (very little oil)", "Ghee dosa (brushed generously)", "Butter dosa (crispy/thick)"],
-                defaultOption: "Standard/Dry dosa (very little oil)",
-                correctionType: "ghee_amount",
-                uiType: "single_choice"
-            )
-            
         default:
-            return
+            break
         }
         
         let newEvent = FoodEvent(
@@ -203,134 +113,351 @@ public final class IntakeViewModel {
             mealTime: getFormattedTime(date: now),
             mealType: flowId == "banana_chips" ? .snack : (flowId == "dosa_backfill" ? .breakfast : .lunch),
             captureType: captureType,
-            status: isOnline ? .analyzed : .pending,
-            rawTextNote: textNote,
-            primaryImageUrl: imageUrl,
-            thumbnailUrl: imageUrl
+            status: .pending,
+            rawTextNote: noteText,
+            primaryImageUrl: URL(string: visualUrlString),
+            thumbnailUrl: URL(string: visualUrlString)
         )
         
-        activeEvent = newEvent
-        activeItems = mockItems
-        activeEstimate = mockEstimate
-        activeQuestion = mockQuestion
-        selectedCorrectionOption = mockQuestion?.defaultOption ?? ""
+        self.activeEvent = newEvent
         
-        activeView = .analyzing
-        analysisStage = 1
-        
-        // Staged concurrency trigger
         Task {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            analysisStage = 2
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            analysisStage = 3
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            
-            if !isOnline {
-                saveMeal(isOfflineSkip: true)
-            } else {
-                activeView = .review
+            do {
+                if !isOnline {
+                    // Offline fallback: save event locally
+                    try await Task.sleep(nanoseconds: 1_500_000_000)
+                    saveMealOffline(event: newEvent)
+                    return
+                }
+                
+                // 1. Fetch raw asset binary
+                guard let assetUrl = URL(string: visualUrlString) else {
+                    throw NSError(domain: "Intake", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid asset source URL"])
+                }
+                
+                let (imageData, _) = try await URLSession.shared.data(from: assetUrl)
+                
+                // 2. Request R2 Upload Presigned URL from r2-signer
+                let signerRequest = try createSignerRequest(eventId: eventId, mimeType: "image/jpeg")
+                let (signerData, signerRes) = try await URLSession.shared.data(for: signerRequest)
+                
+                guard (signerRes as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 presigned URL authorization failed"])
+                }
+                
+                let signerPayload = try JSONDecoder().decode(SignerResponse.self, from: signerData)
+                
+                // 3. Upload Binary Image strictly zero-Base64 directly to R2 bucket
+                var uploadRequest = URLRequest(url: URL(string: signerPayload.upload_url)!)
+                uploadRequest.httpMethod = "PUT"
+                uploadRequest.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+                uploadRequest.httpBody = imageData
+                
+                let (_, uploadRes) = try await URLSession.shared.data(for: uploadRequest)
+                guard (uploadRes as? HTTPURLResponse)?.statusCode == 200 else {
+                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 PUT asset streaming failed"])
+                }
+                
+                // 4. Handle optional simulated audio voice note upload
+                var r2AudioUrl: String? = nil
+                if voiceAnnotationEnabled && flowId == "kerala_lunch" {
+                    // Create simulated audio note binary representing vocal calibration
+                    let mockAudioText = "This is Kerala Matta Rice, about 1.5 cups, with standard fish curry and Thoran."
+                    let mockAudioData = mockAudioText.data(using: .utf8)!
+                    
+                    let audSignerReq = try createSignerRequest(eventId: eventId, mimeType: "audio/mp4")
+                    let (audSignerData, _) = try await URLSession.shared.data(for: audSignerReq)
+                    let audSignerPayload = try JSONDecoder().decode(SignerResponse.self, from: audSignerData)
+                    
+                    var audUploadReq = URLRequest(url: URL(string: audSignerPayload.upload_url)!)
+                    audUploadReq.httpMethod = "PUT"
+                    audUploadReq.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
+                    audUploadReq.httpBody = mockAudioData
+                    
+                    let (_, audUploadRes) = try await URLSession.shared.data(for: audUploadReq)
+                    if (audUploadRes as? HTTPURLResponse)?.statusCode == 200 {
+                        r2AudioUrl = audSignerPayload.public_url
+                    }
+                }
+                
+                self.analysisStage = 2 // Multimodal edge model parsing
+                
+                // 5. Invoke Edge Ingest Pipeline
+                let ingestPayload = IngestRequest(
+                    event_id: eventId.uuidString,
+                    user_id: userId,
+                    image_url: signerPayload.public_url,
+                    audio_url: r2AudioUrl,
+                    model_name: "gemini-3.5-flash",
+                    meal_time: getFormattedTime(date: now),
+                    meal_type: newEvent.mealType.rawValue,
+                    capture_type: captureType.rawValue,
+                    raw_text_note: noteText
+                )
+                
+                var ingestRequest = URLRequest(url: analyzerUrl)
+                ingestRequest.httpMethod = "POST"
+                ingestRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                ingestRequest.httpBody = try JSONEncoder().encode(ingestPayload)
+                
+                let (ingestData, ingestRes) = try await URLSession.shared.data(for: ingestRequest)
+                guard (ingestRes as? HTTPURLResponse)?.statusCode == 200 else {
+                    let errStr = String(data: ingestData, encoding: .utf8) ?? "Unknown Ingestion pipeline failure"
+                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: errStr])
+                }
+                
+                self.analysisStage = 3 // Calibrating layout structures
+                let analysis = try JSONDecoder().decode(IngestResponse.self, from: ingestData)
+                
+                // Establish structured records returned by Gemini D1 database execution
+                self.activeItems = analysis.detected_items.map { item in
+                    MealItem(
+                        eventId: eventId,
+                        nameDetected: item.name_detected,
+                        nameNormalized: item.name_normalized,
+                        portionUnit: item.portion_unit,
+                        portionValue: item.portion_value,
+                        estimatedGramsLikely: item.estimated_grams_likely,
+                        confidence: item.confidence
+                    )
+                }
+                
+                self.activeEstimate = EstimateVersion(
+                    eventId: eventId,
+                    modelProvider: "google-ai",
+                    modelName: "gemini-3.5-flash",
+                    promptVersion: "v2.1",
+                    nutritionEngineVersion: "vision-v1",
+                    caloriesLow: analysis.estimates.calories_low,
+                    caloriesHigh: analysis.estimates.calories_high,
+                    caloriesLikely: analysis.estimates.calories_likely,
+                    proteinG: analysis.estimates.protein_g,
+                    carbsG: analysis.estimates.carbs_g,
+                    fatG: analysis.estimates.fat_g,
+                    fiberG: analysis.estimates.fiber_g,
+                    confidenceScore: analysis.estimates.confidence_score,
+                    uncertaintyReasons: analysis.estimates.uncertainty_reasons
+                )
+                
+                self.activeQuestion = analysis.one_question
+                self.selectedCorrectionOption = analysis.one_question?.defaultOption ?? ""
+                
+                // Save locally
+                newEvent.status = .analyzed
+                newEvent.primaryImageUrl = URL(string: signerPayload.public_url)
+                
+                try await Task.sleep(nanoseconds: 500_000_000)
+                self.activeView = .review
+                
+            } catch {
+                self.processingError = error.localizedDescription
+                self.activeView = .camera
+                self.activeEvent = nil
+                print("INGEST ERROR:", error.localizedDescription)
             }
         }
     }
+    
+    // MARK: - Rapid Text-Only Prompt-Cached Recompute
     
     public func selectCorrection(option: String) {
-        selectedCorrectionOption = option
-        guard let estimate = activeEstimate else { return }
+        guard let event = activeEvent, let currentEstimate = activeEstimate else { return }
         
-        if activeEvent?.id.uuidString.contains("kerala") == true || activeQuestion?.id == "q_rice_qty" {
-            if option.contains("Small") {
-                estimate.caloriesLow = 620
-                estimate.caloriesHigh = 780
-                estimate.caloriesLikely = 700
-            } else if option.contains("Medium") {
-                estimate.caloriesLow = 720
-                estimate.caloriesHigh = 880
-                estimate.caloriesLikely = 790
-            } else {
-                estimate.caloriesLow = 780
-                estimate.caloriesHigh = 980
-                estimate.caloriesLikely = 870
-            }
-        } else if activeQuestion?.id == "q_chips_fraction" {
-            if option.contains("Half") {
-                estimate.caloriesLow = 170
-                estimate.caloriesHigh = 170
-                estimate.caloriesLikely = 170
-            } else if option.contains("Whole") {
-                estimate.caloriesLow = 340
-                estimate.caloriesHigh = 340
-                estimate.caloriesLikely = 340
-            } else {
-                estimate.caloriesLow = 680
-                estimate.caloriesHigh = 680
-                estimate.caloriesLikely = 680
-            }
-        } else if activeQuestion?.id == "q_dosa_ghee" {
-            if option.contains("Standard") {
-                estimate.caloriesLow = 430
-                estimate.caloriesHigh = 670
-                estimate.caloriesLikely = 540
-            } else if option.contains("Ghee") {
-                estimate.caloriesLow = 530
-                estimate.caloriesHigh = 770
-                estimate.caloriesLikely = 640
-            } else {
-                estimate.caloriesLow = 650
-                estimate.caloriesHigh = 920
-                estimate.caloriesLikely = 780
+        selectedCorrectionOption = option
+        
+        let recomputePayload = RecomputeRequest(
+            action: "recompute",
+            event_id: event.id.uuidString,
+            user_id: event.userId,
+            selection_option: option,
+            original_detected_items: activeItems.map { item in
+                DetectedItem(
+                    name_detected: item.nameDetected,
+                    name_normalized: item.nameNormalized,
+                    portion_unit: item.portionUnit,
+                    portion_value: item.portionValue,
+                    estimated_grams_likely: item.estimatedGramsLikely,
+                    confidence: item.confidence
+                )
+            },
+            previous_estimates: RecomputeEstimates(
+                calories_low: currentEstimate.caloriesLow,
+                calories_high: currentEstimate.caloriesHigh,
+                calories_likely: currentEstimate.caloriesLikely,
+                protein_g: currentEstimate.proteinG,
+                carbs_g: currentEstimate.carbsG,
+                fat_g: currentEstimate.fatG,
+                fiber_g: currentEstimate.fiberG,
+                confidence_score: currentEstimate.confidenceScore,
+                uncertainty_reasons: currentEstimate.uncertaintyReasons
+            )
+        )
+        
+        Task {
+            do {
+                var req = URLRequest(url: analyzerUrl.appendingPathComponent("api/recompute"))
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.httpBody = try JSONEncoder().encode(recomputePayload)
+                
+                let (resData, res) = try await URLSession.shared.data(for: req)
+                guard (res as? HTTPURLResponse)?.statusCode == 200 else {
+                    print("Recompute query rejected by Edge API")
+                    return
+                }
+                
+                let payload = try JSONDecoder().decode(RecomputeResponse.self, from: resData)
+                
+                // Spring animate calorie and macro shifts instantly!
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    currentEstimate.caloriesLow = payload.estimates.calories_low
+                    currentEstimate.caloriesHigh = payload.estimates.calories_high
+                    currentEstimate.caloriesLikely = payload.estimates.calories_likely
+                    currentEstimate.proteinG = payload.estimates.protein_g
+                    currentEstimate.carbsG = payload.estimates.carbs_g
+                    currentEstimate.fatG = payload.estimates.fat_g
+                    currentEstimate.fiberG = payload.estimates.fiber_g
+                    currentEstimate.confidenceScore = payload.estimates.confidence_score
+                    currentEstimate.uncertaintyReasons = payload.estimates.uncertainty_reasons
+                }
+            } catch {
+                print("RECOMPUTE NET FAILURE:", error.localizedDescription)
             }
         }
     }
     
-    public func saveMeal(isOfflineSkip: Bool = false) {
+    // MARK: - Save Log Coordinates
+    
+    public func saveMeal() {
         guard let event = activeEvent, let estimate = activeEstimate else { return }
         
-        if isOnline {
-            event.status = .saved
-        } else {
-            event.status = .pending
-            offlineQueue.append(event)
-        }
+        event.status = .saved
         
         savedEvents.insert(event, at: 0)
         savedItems[event.id] = activeItems
         savedEstimates[event.id] = estimate
         
-        if event.id.uuidString.contains("kerala") == true || activeQuestion?.id == "q_rice_qty" {
-            let label = selectedCorrectionOption.split(separator: " ").first.map(String.init) ?? "1.5"
-            let val = Double(label) ?? 1.5
-            updateMemory(
-                signature: "home_lunch_matta_rice",
-                displayName: "Amma's Matta Rice",
-                portionUnit: "cup",
-                portionValue: val,
-                likelyKcal: val < 1.0 ? 210 : (val < 1.5 ? 330 : 430)
-            )
+        // Refresh telemetry database stats dynamically
+        Task {
+            await fetchTelemetry()
         }
         
-        if !isOfflineSkip {
-            todayRollup.caloriesLikely += estimate.caloriesLikely
-            todayRollup.caloriesLow += estimate.caloriesLow
-            todayRollup.caloriesHigh += estimate.caloriesHigh
-            todayRollup.proteinG += estimate.proteinG
-            todayRollup.eventsCount += 1
-            if event.primaryImageUrl != nil {
-                todayRollup.photoLogsCount += 1
-            } else {
-                todayRollup.noImageLogsCount += 1
+        // Complete the feedback loop and transition back to camera
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            activeView = .camera
+            activeEvent = nil
+            activeEstimate = nil
+            activeItems = []
+            activeQuestion = nil
+        }
+    }
+    
+    private func saveMealOffline(event: FoodEvent) {
+        event.status = .pending
+        offlineQueue.append(event)
+        savedEvents.insert(event, at: 0)
+        
+        withAnimation {
+            activeView = .camera
+            activeEvent = nil
+        }
+    }
+    
+    // MARK: - Database Rollups Synchronizations (Cloud D1 GET Endpoints)
+    
+    public func fetchTelemetry() async {
+        guard isOnline else { return }
+        
+        do {
+            let userId = "usr_sidharth_902"
+            
+            // 1. Fetch D1 SQLite Event Ledger history
+            let historyUrl = analyzerUrl.appending(path: "api/history").appending(queryItems: [URLQueryItem(name: "user_id", value: userId)])
+            let (histData, histRes) = try await URLSession.shared.data(from: historyUrl)
+            
+            if (histRes as? HTTPURLResponse)?.statusCode == 200 {
+                let enrichedEvents = try JSONDecoder().decode([D1EnrichedEvent].self, from: histData)
+                self.savedEvents = enrichedEvents.map { e in
+                    let fe = FoodEvent(
+                        id: UUID(uuidString: e.id) ?? UUID(),
+                        userId: e.user_id,
+                        createdAt: DateFormatter.iso8601.date(from: e.created_at) ?? Date(),
+                        mealTime: e.meal_time,
+                        mealType: MealType(rawValue: e.meal_type) ?? .lunch,
+                        captureType: CaptureType(rawValue: e.capture_type) ?? .photo,
+                        status: EventStatus(rawValue: e.status) ?? .saved,
+                        rawTextNote: e.raw_text_note,
+                        primaryImageUrl: e.primary_image_url.flatMap(URL.init),
+                        thumbnailUrl: e.thumbnail_url.flatMap(URL.init)
+                    )
+                    
+                    if let est = e.latest_estimate {
+                        let ev = EstimateVersion(
+                            eventId: fe.id,
+                            modelProvider: est.model_provider,
+                            modelName: est.model_name,
+                            promptVersion: est.prompt_version,
+                            nutritionEngineVersion: est.nutrition_engine_version,
+                            caloriesLow: est.calories_low,
+                            caloriesHigh: est.calories_high,
+                            caloriesLikely: est.calories_likely,
+                            proteinG: est.protein_g,
+                            carbsG: est.carbs_g,
+                            fatG: est.fat_g,
+                            fiberG: est.fiber_g,
+                            confidenceScore: est.confidence_score,
+                            uncertaintyReasons: (try? JSONDecoder().decode([String].self, from: est.uncertainty_reasons.data(using: .utf8)!)) ?? []
+                        )
+                        self.savedEstimates[fe.id] = ev
+                    }
+                    
+                    self.savedItems[fe.id] = e.items.map { it in
+                        MealItem(
+                            eventId: fe.id,
+                            nameDetected: it.name_detected,
+                            nameNormalized: it.name_normalized,
+                            portionUnit: it.portion_unit,
+                            portionValue: it.portion_value,
+                            estimatedGramsLikely: it.estimated_grams_likely,
+                            confidence: it.confidence
+                        )
+                    }
+                    
+                    return fe
+                }
             }
             
-            if let index = dailyRollups.firstIndex(where: { Calendar.current.isDateInToday($0.date) }) {
-                dailyRollups[index] = todayRollup
+            // 2. Fetch D1 SQLite rollups
+            let rollupUrl = analyzerUrl.appending(path: "api/rollup").appending(queryItems: [URLQueryItem(name: "user_id", value: userId)])
+            let (rollData, rollRes) = try await URLSession.shared.data(from: rollupUrl)
+            
+            if (rollRes as? HTTPURLResponse)?.statusCode == 200 {
+                let d1Rollups = try JSONDecoder().decode([D1Rollup].self, from: rollData)
+                self.dailyRollups = d1Rollups.map { r in
+                    DailyRollup(
+                        userId: r.user_id,
+                        date: DateFormatter.yyyyMMdd.date(from: r.date) ?? Date(),
+                        caloriesLow: r.calories_low,
+                        caloriesHigh: r.calories_high,
+                        caloriesLikely: r.calories_likely,
+                        proteinG: r.protein_g,
+                        carbsG: r.carbs_g,
+                        fatG: r.fat_g,
+                        eventsCount: r.events_count,
+                        photoLogsCount: r.photo_logs_count,
+                        noImageLogsCount: r.no_image_logs_count,
+                        confidenceScore: r.confidence_score
+                    )
+                }
+                
+                if let today = dailyRollups.last {
+                    self.todayRollup = today
+                }
             }
+            
+        } catch {
+            print("TELEMETRY FETCH FAILS:", error.localizedDescription)
         }
-        
-        activeView = .camera
-        activeEvent = nil
-        activeEstimate = nil
-        activeItems = []
-        activeQuestion = nil
     }
     
     public func toggleOnline() {
@@ -338,47 +465,16 @@ public final class IntakeViewModel {
         if isOnline && !offlineQueue.isEmpty {
             Task {
                 for i in 0..<offlineQueue.count {
-                    let queuedEvent = offlineQueue[i]
-                    if let idx = savedEvents.firstIndex(where: { $0.id == queuedEvent.id }) {
-                        savedEvents[idx].status = .saved
-                        
-                        if let est = savedEstimates[queuedEvent.id] {
-                            todayRollup.caloriesLikely += est.caloriesLikely
-                            todayRollup.caloriesLow += est.caloriesLow
-                            todayRollup.caloriesHigh += est.caloriesHigh
-                            todayRollup.proteinG += est.proteinG
-                            todayRollup.eventsCount += 1
-                            todayRollup.photoLogsCount += 1
-                        }
-                    }
+                    let queued = offlineQueue[i]
+                    queued.status = .saved
                 }
                 offlineQueue.removeAll()
+                await fetchTelemetry()
             }
         }
     }
     
-    private func updateMemory(signature: String, displayName: String, portionUnit: String, portionValue: Double, likelyKcal: Int) {
-        if let idx = personalMemory.firstIndex(where: { $0.foodSignature == signature }) {
-            personalMemory[idx].usualPortionUnit = portionUnit
-            personalMemory[idx].usualPortionValue = portionValue
-            personalMemory[idx].usualCaloriesLikely = likelyKcal
-            personalMemory[idx].correctionCount += 1
-            personalMemory[idx].confidenceScore = min(98, personalMemory[idx].confidenceScore + 2)
-            personalMemory[idx].lastSeenAt = Date()
-        } else {
-            let record = PersonalMemory(
-                userId: "usr_sidharth_902",
-                foodSignature: signature,
-                displayName: displayName,
-                usualPortionUnit: portionUnit,
-                usualPortionValue: portionValue,
-                usualCaloriesLikely: likelyKcal,
-                correctionCount: 1,
-                confidenceScore: 55
-            )
-            personalMemory.append(record)
-        }
-    }
+    // MARK: - Private Utilities
     
     private func getFormattedTime(date: Date) -> String {
         let formatter = DateFormatter()
@@ -386,62 +482,168 @@ public final class IntakeViewModel {
         return formatter.string(from: date)
     }
     
-    private func initializeMockTelemetry() {
-        let calendar = Calendar.current
-        let today = Date()
-        
-        var seedRollups: [DailyRollup] = []
-        for i in (0...13).reversed() {
-            guard let date = calendar.date(byAdding: .day, value: -i, to: today) else { continue }
-            
-            var cLow = 2100, cHigh = 2500, cLikely = 2310, prot = 68, conf = 88, photos = 3, noPhotos = 0
-            
-            switch i {
-            case 0:
-                cLow = 1100; cHigh = 1450; cLikely = 1280; prot = 42; conf = 91; photos = 2; noPhotos = 0
-            case 1:
-                cLow = 2700; cHigh = 3300; cLikely = 2990; prot = 50; conf = 82; photos = 4; noPhotos = 1
-            case 2:
-                cLow = 2200; cHigh = 2650; cLikely = 2420; prot = 66; conf = 88; photos = 3; noPhotos = 0
-            case 3:
-                cLow = 2500; cHigh = 3000; cLikely = 2750; prot = 62; conf = 78; photos = 3; noPhotos = 1
-            case 4:
-                cLow = 1900; cHigh = 2350; cLikely = 2120; prot = 75; conf = 91; photos = 3; noPhotos = 0
-            case 5:
-                cLow = 2350; cHigh = 2800; cLikely = 2590; prot = 52; conf = 69; photos = 2; noPhotos = 2
-            case 6:
-                cLow = 2150; cHigh = 2600; cLikely = 2380; prot = 70; conf = 87; photos = 3; noPhotos = 0
-            default:
-                cLow = 2000 + i * 20; cHigh = 2400 + i * 30; cLikely = 2200 + i * 25; prot = 60 + i; conf = 85
-            }
-            
-            let rollup = DailyRollup(
-                userId: "usr_sidharth_902",
-                date: date,
-                caloriesLow: cLow,
-                caloriesHigh: cHigh,
-                caloriesLikely: cLikely,
-                proteinG: prot,
-                carbsG: cLikely * 50 / 100 / 4,
-                fatG: cLikely * 30 / 100 / 9,
-                eventsCount: photos + noPhotos,
-                photoLogsCount: photos,
-                noImageLogsCount: noPhotos,
-                confidenceScore: conf
-            )
-            seedRollups.append(rollup)
-        }
-        
-        self.dailyRollups = seedRollups
-        if let currentRollup = seedRollups.last {
-            self.todayRollup = currentRollup
-        }
-        
-        personalMemory = [
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "home_lunch_matta_rice", displayName: "Amma's Matta Rice", usualPortionUnit: "cup", usualPortionValue: 1.5, usualCaloriesLikely: 430, correctionCount: 7, confidenceScore: 89),
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "home_fish_curry_coconut", displayName: "Amma's Fish Curry", usualPortionUnit: "bowl", usualPortionValue: 1.0, usualCaloriesLikely: 220, correctionCount: 5, confidenceScore: 84),
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "breakfast_dosa_home", displayName: "Home Dosa", usualPortionUnit: "piece", usualPortionValue: 2.0, usualCaloriesLikely: 260, correctionCount: 12, confidenceScore: 95),
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "filter_coffee_standard", displayName: "South Indian Filter Coffee", usualPortionUnit: "tumbler", usualPortionValue: 1.0, usualCaloriesLikely: 110, correctionCount: 19, confidenceScore: 92)
-        ]
+    private func createSignerRequest(eventId: UUID, mimeType: String) throws -> URLRequest {
+        var req = URLRequest(url: signerUrl)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload = SignerRequest(event_id: eventId.uuidString, mime_type: mimeType, file_extension: mimeType == "image/jpeg" ? "jpg" : "m4a")
+        req.httpBody = try JSONEncoder().encode(payload)
+        return req
     }
+}
+
+// MARK: - Ingestion Networking Contracts
+
+struct SignerRequest: Codable {
+    let event_id: String
+    let mime_type: String
+    let file_extension: String
+}
+
+struct SignerResponse: Codable {
+    let upload_url: String
+    let r2_key: String
+    let public_url: String
+}
+
+struct IngestRequest: Codable {
+    let event_id: String
+    let user_id: String
+    let image_url: String
+    let audio_url: String?
+    let model_name: String
+    let meal_time: String
+    let meal_type: String
+    let capture_type: String
+    let raw_text_note: String?
+}
+
+struct DetectedItem: Codable {
+    let name_detected: String
+    let name_normalized: String
+    let portion_unit: String
+    let portion_value: Double
+    let estimated_grams_likely: Int
+    let confidence: String
+}
+
+struct IngestEstimates: Codable {
+    let calories_low: Int
+    let calories_high: Int
+    let calories_likely: Int
+    let protein_g: Int
+    let carbs_g: Int
+    let fat_g: Int
+    let fiber_g: Int?
+    let confidence_score: Int
+    let uncertainty_reasons: [String]
+}
+
+struct IngestResponse: Codable {
+    let meal_type: String
+    let detected_items: [DetectedItem]
+    let estimates: IngestEstimates
+    let one_question: PortionQuestion?
+}
+
+// MARK: - Recomputation Contracts
+
+struct RecomputeRequest: Codable {
+    let action: String
+    let event_id: String
+    let user_id: String
+    let selection_option: String
+    let original_detected_items: [DetectedItem]
+    let previous_estimates: RecomputeEstimates
+}
+
+struct RecomputeEstimates: Codable {
+    let calories_low: Int
+    let calories_high: Int
+    let calories_likely: Int
+    let protein_g: Int
+    let carbs_g: Int
+    let fat_g: Int
+    let fiber_g: Int?
+    let confidence_score: Int
+    let uncertainty_reasons: [String]
+}
+
+struct RecomputeResponse: Codable {
+    let event_id: String
+    let estimates: RecomputeEstimates
+}
+
+// MARK: - D1 Database Pull Decoders
+
+struct D1EnrichedEvent: Codable {
+    let id: String
+    let user_id: String
+    let created_at: String
+    let meal_time: String
+    let meal_type: String
+    let capture_type: String
+    let status: String
+    let raw_text_note: String?
+    let primary_image_url: String?
+    let thumbnail_url: String?
+    let items: [D1Item]
+    let latest_estimate: D1Estimate?
+}
+
+struct D1Item: Codable {
+    let name_detected: String
+    let name_normalized: String
+    let portion_unit: String
+    let portion_value: Double
+    let estimated_grams_likely: Int
+    let confidence: String
+}
+
+struct D1Estimate: Codable {
+    let model_provider: String
+    let model_name: String
+    let prompt_version: String
+    let nutrition_engine_version: String
+    let calories_low: Int
+    let calories_high: Int
+    let calories_likely: Int
+    let protein_g: Int
+    let carbs_g: Int
+    let fat_g: Int
+    let fiber_g: Int?
+    let confidence_score: Int
+    let uncertainty_reasons: String
+}
+
+struct D1Rollup: Codable {
+    let user_id: String
+    let date: String
+    let calories_low: Int
+    let calories_high: Int
+    let calories_likely: Int
+    let protein_g: Int
+    let carbs_g: Int
+    let fat_g: Int
+    let events_count: Int
+    let photo_logs_count: Int
+    let no_image_logs_count: Int
+    let confidence_score: Int
+}
+
+// MARK: - Date Formatting Helpers
+
+extension DateFormatter {
+    static let iso8601: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+        df.locale = Locale(identifier: "en_US_POSIX")
+        return df
+    }()
+    
+    static let yyyyMMdd: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        return df
+    }()
 }

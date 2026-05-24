@@ -1,12 +1,12 @@
 // Cloudflare Worker: ai-analyzer
 // Pure Multimodal Edge Ingestion Pipeline supporting Audio + Image direct Files API caches,
-// AI-driven dynamic UI forms generation, and synchronous recomputation feedback loops.
+// Full D1 SQLite Ledger operations, and prompt-cached recomputation feedback loops.
 
 export default {
   async fetch(request, env) {
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
     };
 
@@ -14,21 +14,87 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    if (request.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
-    }
-
-    let tempImageName = null;
-    let tempAudioName = null;
+    const url = new URL(request.url);
+    const path = url.pathname;
 
     try {
-      const payload = await request.json();
-      
       // =======================================================================
-      // BRANCH A: Recompute / Calibration Feedback Loop
+      // ROUTE 1: GET /api/history (Fetch user food events & latest estimates)
       // =======================================================================
-      if (payload.action === "recompute") {
-        const { event_id, selection_option, original_detected_items, previous_estimates } = payload;
+      if (request.method === "GET" && path === "/api/history") {
+        const userId = url.searchParams.get("user_id") || "usr_sidharth_902";
+        
+        // Fetch all food events
+        const eventsQuery = await env.DB.prepare(`
+          SELECT * FROM food_events 
+          WHERE user_id = ? 
+          ORDER BY created_at DESC 
+          LIMIT 50
+        `).bind(userId).all();
+        
+        const events = eventsQuery.results || [];
+        const enrichedEvents = [];
+        
+        for (const event of events) {
+          // Fetch items for this event
+          const itemsQuery = await env.DB.prepare(`
+            SELECT * FROM meal_items WHERE event_id = ?
+          `).bind(event.id).all();
+          
+          // Fetch the latest estimate version
+          const estimateQuery = await env.DB.prepare(`
+            SELECT * FROM estimate_versions 
+            WHERE event_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT 1
+          `).bind(event.id).first();
+          
+          enrichedEvents.push({
+            ...event,
+            items: itemsQuery.results || [],
+            latest_estimate: estimateQuery || null
+          });
+        }
+        
+        return new Response(JSON.stringify(enrichedEvents), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      // =======================================================================
+      // ROUTE 2: GET /api/rollup (Fetch 14-day history rollup)
+      // =======================================================================
+      if (request.method === "GET" && path === "/api/rollup") {
+        const userId = url.searchParams.get("user_id") || "usr_sidharth_902";
+        
+        const rollupsQuery = await env.DB.prepare(`
+          SELECT * FROM daily_rollups 
+          WHERE user_id = ? 
+          ORDER BY date DESC 
+          LIMIT 14
+        `).bind(userId).all();
+        
+        // Sort chronologically for the graph rendering
+        const sortedRollups = (rollupsQuery.results || []).reverse();
+        
+        return new Response(JSON.stringify(sortedRollups), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      // Read JSON payload for write requests
+      let payload = {};
+      if (request.method === "POST") {
+        payload = await request.json();
+      }
+
+      // =======================================================================
+      // ROUTE 3: POST /api/recompute (Text-only recalculation)
+      // =======================================================================
+      if (path === "/api/recompute" || payload.action === "recompute") {
+        const { event_id, user_id, selection_option, original_detected_items, previous_estimates } = payload;
         
         if (!event_id || !selection_option || !original_detected_items || !previous_estimates) {
           return new Response(
@@ -36,6 +102,8 @@ export default {
             { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
+
+        const activeUserId = user_id || "usr_sidharth_902";
 
         // Call Gemini text-only model to run rapid, clean re-calibration
         const recomputePrompt = `
@@ -79,14 +147,8 @@ export default {
             "x-goog-api-key": env.GEMINI_API_KEY
           },
           body: JSON.stringify({
-            contents: [
-              {
-                parts: [{ text: recomputePrompt }]
-              }
-            ],
-            generationConfig: {
-              responseMimeType: "application/json"
-            }
+            contents: [{ parts: [{ text: recomputePrompt }] }],
+            generationConfig: { responseMimeType: "application/json" }
           })
         });
 
@@ -97,18 +159,86 @@ export default {
 
         const geminiData = await geminiResponse.json();
         const rawText = geminiData.candidates[0].content.parts[0].text;
-        const recomputedEstimates = JSON.parse(rawText.trim());
+        const parsed = JSON.parse(rawText.trim());
+        const newEstimates = parsed.estimates;
 
-        return new Response(JSON.stringify({ event_id, ...recomputedEstimates }), {
+        // --- SQL TRANSACTION IN D1 ---
+        // 1. Log Correction Record
+        const correctionId = crypto.randomUUID();
+        await env.DB.prepare(`
+          INSERT INTO corrections (id, event_id, item_id, correction_type, old_value, new_value)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(
+          correctionId,
+          event_id,
+          null, // item_id optional
+          "portion",
+          previous_estimates.calories_likely.toString(),
+          newEstimates.calories_likely.toString()
+        ).run();
+
+        // 2. Insert new Versioned Estimate
+        const estimateId = crypto.randomUUID();
+        await env.DB.prepare(`
+          INSERT INTO estimate_versions (
+            id, event_id, model_provider, model_name, prompt_version, 
+            nutrition_engine_version, calories_low, calories_high, calories_likely, 
+            protein_g, carbs_g, fat_g, fiber_g, confidence_score, uncertainty_reasons
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          estimateId,
+          event_id,
+          "google-ai",
+          "gemini-2.5-flash",
+          "v2.1",
+          "recompute-v1",
+          newEstimates.calories_low,
+          newEstimates.calories_high,
+          newEstimates.calories_likely,
+          newEstimates.protein_g,
+          newEstimates.carbs_g,
+          newEstimates.fat_g,
+          newEstimates.fiber_g || 0,
+          newEstimates.confidence_score,
+          JSON.stringify(newEstimates.uncertainty_reasons)
+        ).run();
+
+        // 3. Update Daily Rollup difference
+        const todayDate = new Date().toISOString().split("T")[0];
+        const diffLikely = newEstimates.calories_likely - previous_estimates.calories_likely;
+        const diffLow = newEstimates.calories_low - previous_estimates.calories_low;
+        const diffHigh = newEstimates.calories_high - previous_estimates.calories_high;
+        const diffProtein = newEstimates.protein_g - previous_estimates.protein_g;
+        const diffCarbs = newEstimates.carbs_g - previous_estimates.carbs_g;
+        const diffFat = newEstimates.fat_g - previous_estimates.fat_g;
+
+        await env.DB.prepare(`
+          INSERT INTO daily_rollups (
+            user_id, date, calories_low, calories_high, calories_likely, 
+            protein_g, carbs_g, fat_g, events_count, photo_logs_count, no_image_logs_count, confidence_score
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 95)
+          ON CONFLICT(user_id, date) DO UPDATE SET
+            calories_low = calories_low + ?,
+            calories_high = calories_high + ?,
+            calories_likely = calories_likely + ?,
+            protein_g = protein_g + ?,
+            carbs_g = carbs_g + ?,
+            fat_g = fat_g + ?
+        `).bind(
+          activeUserId, todayDate,
+          diffLow, diffHigh, diffLikely, diffProtein, diffCarbs, diffFat
+        ).run();
+
+        return new Response(JSON.stringify({ event_id, estimates: newEstimates }), {
           status: 200,
           headers: { ...corsHeaders, "Content-Type": "application/json" }
         });
       }
 
       // =======================================================================
-      // BRANCH B: Pure Multimodal Ingestion Ingestion (Audio + Image)
+      // ROUTE 4: POST /api/ingest (Standard Media Ingestion - Audio + Image)
       // =======================================================================
-      const { event_id, user_id, image_url, audio_url, model_name } = payload;
+      const { event_id, user_id, image_url, audio_url, model_name, meal_time, meal_type, capture_type, raw_text_note } = payload;
 
       if (!event_id || !user_id || !image_url) {
         return new Response(
@@ -117,7 +247,10 @@ export default {
         );
       }
 
-      // 1. Fetch raw image binary from secure R2 URL
+      let tempImageName = null;
+      let tempAudioName = null;
+
+      // 1. Fetch raw image binary from R2
       const imageResponse = await fetch(image_url);
       if (!imageResponse.ok) {
         throw new Error(`Failed to fetch image from URL: ${image_url}`);
@@ -125,7 +258,7 @@ export default {
       const imageBuffer = await imageResponse.arrayBuffer();
       const imageMime = imageResponse.headers.get("content-type") || "image/jpeg";
 
-      // 2. Upload raw image directly to Gemini Files API (Zero-Base64 Edge stream!)
+      // 2. Upload raw image to Gemini Files API
       const imgBoundary = "intake_boundary_img_upload";
       const imgMetadata = JSON.stringify({ file: { displayName: `Plate ${event_id}`, mimeType: imageMime } });
       const imgHeader = `--${imgBoundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${imgMetadata}\r\n--${imgBoundary}\r\nContent-Type: ${imageMime}\r\n\r\n`;
@@ -155,9 +288,9 @@ export default {
 
       const imgUploadData = await imgUploadResponse.json();
       const imageUri = imgUploadData.file.uri;
-      tempImageName = imgUploadData.file.name; // e.g. "files/img123"
+      tempImageName = imgUploadData.file.name;
 
-      // 3. Handle optional audio voice notes Direct Ingestion
+      // 3. Optional Audio Upload
       let audioUri = null;
       if (audio_url) {
         const audioResponse = await fetch(audio_url);
@@ -165,7 +298,6 @@ export default {
           const audioBuffer = await audioResponse.arrayBuffer();
           const audioMime = audioResponse.headers.get("content-type") || "audio/mp4";
 
-          // Upload raw voice note audio to Gemini Files API
           const audBoundary = "intake_boundary_aud_upload";
           const audMetadata = JSON.stringify({ file: { displayName: `Voice ${event_id}`, mimeType: audioMime } });
           const audHeader = `--${audBoundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${audMetadata}\r\n--${audBoundary}\r\nContent-Type: ${audioMime}\r\n\r\n`;
@@ -190,14 +322,12 @@ export default {
           if (audUploadResponse.ok) {
             const audUploadData = await audUploadResponse.json();
             audioUri = audUploadData.file.uri;
-            tempAudioName = audUploadData.file.name; // e.g. "files/aud123"
+            tempAudioName = audUploadData.file.name;
           }
         }
       }
 
-      // =======================================================================
-      // STEP 4: Google Gemini Vision Generation via Cloudflare AI Gateway
-      // =======================================================================
+      // 4. Query Gemini Vision Parser via Gateway
       const systemPrompt = `
         You are the Vision & Nutrition Estimation engine of the "Intake" personal nutrition observatory.
         Analyze this food image along with the optional raw voice audio annotation.
@@ -206,6 +336,7 @@ export default {
         CRITICAL NUTRITION OBSERVATORY INSTRUCTIONS:
         1. Parse the meal into isolated items with objective, physical units (e.g. portion_unit: "cup", "slice", "bowl", "piece", "gram" and portion_value: 1.5, 2, 350) instead of subjective adjectives like "Large/Medium/Small".
         2. Do not assume or hardcode portion picker selections. Analyze the biggest volumetric or ingredient uncertainty in this specific plate and dynamically construct a calibration question and UI schema to let the user clarify this uncertainty.
+        3. Do not include subjective words in the picker choices. Options must represent strict objective scales (e.g., ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"], ["1 slice", "2 slices", "3 slices", "4+ slices"], ["Quarter", "Half", "Three-Quarter", "Whole"]).
         
         DYNAMIC FORM UI DESIGN PARAMETERS:
         Match the "ui_type" directly to the food structure:
@@ -249,7 +380,6 @@ export default {
         }
       `;
 
-      // Use verified live model: gemini-3.5-flash
       const selectedModel = model_name || "gemini-3.5-flash";
       const gatewayUrl = `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_GATEWAY_NAME}/google-ai-studio/v1beta/models/${selectedModel}:generateContent`;
 
@@ -270,58 +400,132 @@ export default {
           "x-goog-api-key": env.GEMINI_API_KEY
         },
         body: JSON.stringify({
-          contents: [
-            {
-              parts: contentsParts
-            }
-          ],
-          generationConfig: {
-            responseMimeType: "application/json"
-          }
+          contents: [{ parts: contentsParts }],
+          generationConfig: { responseMimeType: "application/json" }
         })
       });
 
       if (!geminiResponse.ok) {
         const errorText = await geminiResponse.text();
-        throw new Error(`Gemini Vision Parse via AI Gateway Failed: ${geminiResponse.status} - ${errorText}`);
+        throw new Error(`Gemini Vision Parse Failed: ${geminiResponse.status} - ${errorText}`);
       }
 
       const geminiData = await geminiResponse.json();
       const rawTextResult = geminiData.candidates[0].content.parts[0].text;
       const parsedVision = JSON.parse(rawTextResult.trim());
 
-      // =======================================================================
-      // STEP 5: Structured Ingestion Response Payload
-      // =======================================================================
-      const responsePayload = {
+      // --- SQL TRANSACTION IN D1 ---
+      // 1. Insert Ingestion Event
+      const timeStr = meal_time || new Date().toISOString().split("T")[1].slice(0, 5);
+      const typeStr = meal_type || parsedVision.meal_type || "lunch";
+      const capType = capture_type || (audio_url ? "photo_voice" : "photo");
+      
+      await env.DB.prepare(`
+        INSERT INTO food_events (
+          id, user_id, meal_time, meal_type, capture_type, status, 
+          raw_text_note, primary_image_url, thumbnail_url, timezone
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
         event_id,
-        meal_type: parsedVision.meal_type,
-        detected_items: parsedVision.detected_items.map(item => ({
-          name_detected: item.name_detected,
-          name_normalized: item.name_normalized,
-          portion_unit: item.portion_unit,
-          portion_value: item.portion_value,
-          estimated_grams_likely: item.estimated_grams_likely,
-          confidence: item.confidence
-        })),
-        estimates: {
-          calories_low: parsedVision.estimates.calories_low,
-          calories_high: parsedVision.estimates.calories_high,
-          calories_likely: parsedVision.estimates.calories_likely,
-          protein_g: parsedVision.estimates.protein_g,
-          carbs_g: parsedVision.estimates.carbs_g,
-          fat_g: parsedVision.estimates.fat_g,
-          fiber_g: parsedVision.estimates.fiber_g || 0,
-          confidence_score: parsedVision.estimates.confidence_score,
-          uncertainty_reasons: parsedVision.estimates.uncertainty_reasons
-        },
-        one_question: parsedVision.one_question
-      };
+        user_id,
+        timeStr,
+        typeStr,
+        capType,
+        "analyzed",
+        raw_text_note || null,
+        image_url,
+        image_url,
+        "Asia/Kolkata"
+      ).run();
 
-      // =======================================================================
-      // STEP 6: Asynchronous Cleanup of Files API
-      // =======================================================================
-      // Visual and audio cache purged instantly to safeguard visual and vocal privacy
+      // 2. Insert detected items
+      for (const item of parsedVision.detected_items) {
+        const itemId = crypto.randomUUID();
+        await env.DB.prepare(`
+          INSERT INTO meal_items (
+            id, event_id, name_detected, name_normalized, portion_unit, portion_value, estimated_grams_likely, confidence
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          itemId,
+          event_id,
+          item.name_detected,
+          item.name_normalized,
+          item.portion_unit,
+          item.portion_value,
+          item.estimated_grams_likely || 0,
+          item.confidence
+        ).run();
+      }
+
+      // 3. Insert Estimate Version
+      const primaryEstId = crypto.randomUUID();
+      await env.DB.prepare(`
+        INSERT INTO estimate_versions (
+          id, event_id, model_provider, model_name, prompt_version, 
+          nutrition_engine_version, calories_low, calories_high, calories_likely, 
+          protein_g, carbs_g, fat_g, fiber_g, confidence_score, uncertainty_reasons
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        primaryEstId,
+        event_id,
+        "google-ai",
+        selectedModel,
+        "v2.1",
+        "vision-v1",
+        parsedVision.estimates.calories_low,
+        parsedVision.estimates.calories_high,
+        parsedVision.estimates.calories_likely,
+        parsedVision.estimates.protein_g,
+        parsedVision.estimates.carbs_g,
+        parsedVision.estimates.fat_g,
+        parsedVision.estimates.fiber_g || 0,
+        parsedVision.estimates.confidence_score,
+        JSON.stringify(parsedVision.estimates.uncertainty_reasons)
+      ).run();
+
+      // 4. Update Daily Rollup
+      const todayDate = new Date().toISOString().split("T")[0];
+      const isPhoto = image_url ? 1 : 0;
+      const isNoPhoto = image_url ? 0 : 1;
+
+      await env.DB.prepare(`
+        INSERT INTO daily_rollups (
+          user_id, date, calories_low, calories_high, calories_likely, 
+          protein_g, carbs_g, fat_g, events_count, photo_logs_count, no_image_logs_count, confidence_score
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        ON CONFLICT(user_id, date) DO UPDATE SET
+          calories_low = calories_low + ?,
+          calories_high = calories_high + ?,
+          calories_likely = calories_likely + ?,
+          protein_g = protein_g + ?,
+          carbs_g = carbs_g + ?,
+          fat_g = fat_g + ?,
+          events_count = events_count + 1,
+          photo_logs_count = photo_logs_count + ?,
+          no_image_logs_count = no_image_logs_count + ?
+      `).bind(
+        user_id, todayDate,
+        parsedVision.estimates.calories_low,
+        parsedVision.estimates.calories_high,
+        parsedVision.estimates.calories_likely,
+        parsedVision.estimates.protein_g,
+        parsedVision.estimates.carbs_g,
+        parsedVision.estimates.fat_g,
+        isPhoto,
+        isNoPhoto,
+        parsedVision.estimates.confidence_score,
+        
+        parsedVision.estimates.calories_low,
+        parsedVision.estimates.calories_high,
+        parsedVision.estimates.calories_likely,
+        parsedVision.estimates.protein_g,
+        parsedVision.estimates.carbs_g,
+        parsedVision.estimates.fat_g,
+        isPhoto,
+        isNoPhoto
+      ).run();
+
+      // Instant async cleanup of Visual & Audio Files API keys
       if (tempImageName) {
         try {
           await fetch(`https://generativelanguage.googleapis.com/v1beta/${tempImageName}?key=${env.GEMINI_API_KEY}`, {
@@ -337,44 +541,16 @@ export default {
         } catch (_) {}
       }
 
-      return new Response(JSON.stringify(responsePayload), {
+      return new Response(JSON.stringify({ event_id, ...parsedVision }), {
         status: 200,
-        headers: {
-          ...corsHeaders,
-          "Content-Type": "application/json"
-        }
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
+
     } catch (error) {
       console.error("FATAL Ingestion Error:", error.message);
-
-      // Attempt secure file purge cleanup if uploads were made before pipeline failed
-      if (tempImageName) {
-        try {
-          await fetch(`https://generativelanguage.googleapis.com/v1beta/${tempImageName}?key=${env.GEMINI_API_KEY}`, {
-            method: "DELETE"
-          });
-        } catch (_) {}
-      }
-      if (tempAudioName) {
-        try {
-          await fetch(`https://generativelanguage.googleapis.com/v1beta/${tempAudioName}?key=${env.GEMINI_API_KEY}`, {
-            method: "DELETE"
-          });
-        } catch (_) {}
-      }
-
       return new Response(
-        JSON.stringify({
-          error: "Ingestion pipeline failure",
-          message: error.message
-        }),
-        {
-          status: 500,
-          headers: {
-            ...corsHeaders,
-            "Content-Type": "application/json"
-          }
-        }
+        JSON.stringify({ error: "Ingestion pipeline failure", message: error.message }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
   }
