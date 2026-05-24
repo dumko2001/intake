@@ -1,0 +1,36 @@
+# Credentials and Secrets
+.env
+.env.*
+supabase/.env
+
+# Node and package caches
+node_modules/
+.npm
+.vite/
+.temp/
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Swift & Xcode Build Artifacts
+.build/
+Build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+.swiftpm/
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcshareddata/
+xcuserdata/
+
+# Package manager dependencies
+.swiftpm/xcode/package.resolved
+.swiftpm/xcode/xcuserdata/

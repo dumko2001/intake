@@ -1,0 +1,10 @@
+name = "ai-analyzer"
+main = "index.js"
+compatibility_date = "2024-05-02"
+compatibility_flags = [ "nodejs_compat" ]
+
+[vars]
+CF_ACCOUNT_ID = "57014886c6cd87ebacf23a94e56a6e0c"
+CF_GATEWAY_NAME = "intake-ai-gateway"
+SUPABASE_URL = "https://nwacgxpidrzfasrurpha.supabase.co"
+# Note: Sensitive secrets like GEMINI_API_KEY and SUPABASE_ANON_KEY will be set via wrangler secrets put
