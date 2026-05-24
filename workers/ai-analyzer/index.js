@@ -1,6 +1,7 @@
 // Cloudflare Worker: ai-analyzer
 // Pure Multimodal Edge Ingestion Pipeline supporting Audio + Image direct Files API caches,
 // Full D1 SQLite Ledger operations, and prompt-cached recomputation feedback loops.
+// Hardened against Server-Side Request Forgery (SSRF), Path Traversal, and billing exploits.
 
 export default {
   async fetch(request, env) {
@@ -14,8 +15,40 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
+    // 1. Bearer Token Authorization check (OWASP Broken Object Level/Function Auth block)
+    const authHeader = request.headers.get("Authorization");
+    const clientKey = env.CLIENT_SECRET_KEY || "intake_secure_shield_902";
+    if (!authHeader || authHeader !== `Bearer ${clientKey}`) {
+      return new Response(JSON.stringify({ error: "Unauthorized access" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Helper: Enforce strong SSRF Host Whitelist
+    const validateHost = (urlStr) => {
+      const parsed = new URL(urlStr);
+      const allowedHosts = [
+        env.CDN_DOMAIN || "intake-media.57014886c6cd87ebacf23a94e56a6e0c.r2.cloudflarestorage.com",
+        "images.unsplash.com",
+        "generativelanguage.googleapis.com"
+      ];
+      const isAllowed = allowedHosts.some(host => parsed.hostname === host || parsed.hostname.endsWith(host));
+      if (!isAllowed) {
+        throw new Error(`SSRF Blocked: URL host ${parsed.hostname} is forbidden`);
+      }
+    };
+
+    // Helper: UUID Format Validation
+    const validateUUID = (uuid) => {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(uuid)) {
+        throw new Error("Invalid UUID structure");
+      }
+    };
 
     try {
       // =======================================================================
@@ -75,7 +108,6 @@ export default {
           LIMIT 14
         `).bind(userId).all();
         
-        // Sort chronologically for the graph rendering
         const sortedRollups = (rollupsQuery.results || []).reverse();
         
         return new Response(JSON.stringify(sortedRollups), {
@@ -103,9 +135,9 @@ export default {
           );
         }
 
+        validateUUID(event_id);
         const activeUserId = user_id || "usr_sidharth_902";
 
-        // Call Gemini text-only model to run rapid, clean re-calibration
         const recomputePrompt = `
           You are the Nutrition Recalibration stage of the "Intake" personal nutrition telemetry system.
           The user has responded to your dynamic portion calibration question.
@@ -163,7 +195,6 @@ export default {
         const newEstimates = parsed.estimates;
 
         // --- SQL TRANSACTION IN D1 ---
-        // 1. Log Correction Record
         const correctionId = crypto.randomUUID();
         await env.DB.prepare(`
           INSERT INTO corrections (id, event_id, item_id, correction_type, old_value, new_value)
@@ -171,13 +202,12 @@ export default {
         `).bind(
           correctionId,
           event_id,
-          null, // item_id optional
+          null,
           "portion",
           previous_estimates.calories_likely.toString(),
           newEstimates.calories_likely.toString()
         ).run();
 
-        // 2. Insert new Versioned Estimate
         const estimateId = crypto.randomUUID();
         await env.DB.prepare(`
           INSERT INTO estimate_versions (
@@ -203,7 +233,6 @@ export default {
           JSON.stringify(newEstimates.uncertainty_reasons)
         ).run();
 
-        // 3. Update Daily Rollup difference
         const todayDate = new Date().toISOString().split("T")[0];
         const diffLikely = newEstimates.calories_likely - previous_estimates.calories_likely;
         const diffLow = newEstimates.calories_low - previous_estimates.calories_low;
@@ -245,6 +274,12 @@ export default {
           JSON.stringify({ error: "Missing required ingestion fields: event_id, user_id, image_url" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
+      }
+
+      validateUUID(event_id);
+      validateHost(image_url);
+      if (audio_url) {
+        validateHost(audio_url);
       }
 
       let tempImageName = null;
@@ -415,7 +450,6 @@ export default {
       const parsedVision = JSON.parse(rawTextResult.trim());
 
       // --- SQL TRANSACTION IN D1 ---
-      // 1. Insert Ingestion Event
       const timeStr = meal_time || new Date().toISOString().split("T")[1].slice(0, 5);
       const typeStr = meal_type || parsedVision.meal_type || "lunch";
       const capType = capture_type || (audio_url ? "photo_voice" : "photo");
@@ -438,7 +472,6 @@ export default {
         "Asia/Kolkata"
       ).run();
 
-      // 2. Insert detected items
       for (const item of parsedVision.detected_items) {
         const itemId = crypto.randomUUID();
         await env.DB.prepare(`
@@ -457,7 +490,6 @@ export default {
         ).run();
       }
 
-      // 3. Insert Estimate Version
       const primaryEstId = crypto.randomUUID();
       await env.DB.prepare(`
         INSERT INTO estimate_versions (
@@ -483,7 +515,6 @@ export default {
         JSON.stringify(parsedVision.estimates.uncertainty_reasons)
       ).run();
 
-      // 4. Update Daily Rollup
       const todayDate = new Date().toISOString().split("T")[0];
       const isPhoto = image_url ? 1 : 0;
       const isNoPhoto = image_url ? 0 : 1;
@@ -525,7 +556,6 @@ export default {
         isNoPhoto
       ).run();
 
-      // Instant async cleanup of Visual & Audio Files API keys
       if (tempImageName) {
         try {
           await fetch(`https://generativelanguage.googleapis.com/v1beta/${tempImageName}?key=${env.GEMINI_API_KEY}`, {

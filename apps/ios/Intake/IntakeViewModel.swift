@@ -198,6 +198,7 @@ public final class IntakeViewModel {
                 var ingestRequest = URLRequest(url: analyzerUrl)
                 ingestRequest.httpMethod = "POST"
                 ingestRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                ingestRequest.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
                 ingestRequest.httpBody = try JSONEncoder().encode(ingestPayload)
                 
                 let (ingestData, ingestRes) = try await URLSession.shared.data(for: ingestRequest)
@@ -298,6 +299,7 @@ public final class IntakeViewModel {
                 var req = URLRequest(url: analyzerUrl.appendingPathComponent("api/recompute"))
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
                 req.httpBody = try JSONEncoder().encode(recomputePayload)
                 
                 let (resData, res) = try await URLSession.shared.data(for: req)
@@ -373,7 +375,9 @@ public final class IntakeViewModel {
             
             // 1. Fetch D1 SQLite Event Ledger history
             let historyUrl = analyzerUrl.appending(path: "api/history").appending(queryItems: [URLQueryItem(name: "user_id", value: userId)])
-            let (histData, histRes) = try await URLSession.shared.data(from: historyUrl)
+            var histReq = URLRequest(url: historyUrl)
+            histReq.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
+            let (histData, histRes) = try await URLSession.shared.data(for: histReq)
             
             if (histRes as? HTTPURLResponse)?.statusCode == 200 {
                 let enrichedEvents = try JSONDecoder().decode([D1EnrichedEvent].self, from: histData)
@@ -429,7 +433,9 @@ public final class IntakeViewModel {
             
             // 2. Fetch D1 SQLite rollups
             let rollupUrl = analyzerUrl.appending(path: "api/rollup").appending(queryItems: [URLQueryItem(name: "user_id", value: userId)])
-            let (rollData, rollRes) = try await URLSession.shared.data(from: rollupUrl)
+            var rollReq = URLRequest(url: rollupUrl)
+            rollReq.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
+            let (rollData, rollRes) = try await URLSession.shared.data(for: rollReq)
             
             if (rollRes as? HTTPURLResponse)?.statusCode == 200 {
                 let d1Rollups = try JSONDecoder().decode([D1Rollup].self, from: rollData)
@@ -486,6 +492,7 @@ public final class IntakeViewModel {
         var req = URLRequest(url: signerUrl)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
         let payload = SignerRequest(event_id: eventId.uuidString, mime_type: mimeType, file_extension: mimeType == "image/jpeg" ? "jpg" : "m4a")
         req.httpBody = try JSONEncoder().encode(payload)
         return req
