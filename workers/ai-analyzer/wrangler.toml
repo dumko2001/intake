@@ -6,5 +6,11 @@ compatibility_flags = [ "nodejs_compat" ]
 [vars]
 CF_ACCOUNT_ID = "57014886c6cd87ebacf23a94e56a6e0c"
 CF_GATEWAY_NAME = "intake-ai-gateway"
-SUPABASE_URL = "https://nwacgxpidrzfasrurpha.supabase.co"
-# Note: Sensitive secrets like GEMINI_API_KEY and SUPABASE_ANON_KEY will be set via wrangler secrets put
+MODEL_NAME = "gemini-3.5-flash"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "intake-db"
+database_id = "c6633e20-fb98-47c0-8bbb-f946a2456ba4" # Provisioned in Cloudflare account
+
+# Sensitive secrets like GEMINI_API_KEY will be set via wrangler secrets put

@@ -115,9 +115,8 @@ public final class MealItem {
     public var eventId: UUID
     public var nameDetected: String
     public var nameNormalized: String
-    public var portionLabel: String
-    public var estimatedGramsLow: Int
-    public var estimatedGramsHigh: Int
+    public var portionUnit: String      // Objective unit: e.g. "cup", "gram", "slice", "bowl"
+    public var portionValue: Double     // Objective value: e.g. 1.5, 300, 2
     public var estimatedGramsLikely: Int
     public var confidence: String
 
@@ -126,9 +125,8 @@ public final class MealItem {
         eventId: UUID,
         nameDetected: String,
         nameNormalized: String,
-        portionLabel: String,
-        estimatedGramsLow: Int,
-        estimatedGramsHigh: Int,
+        portionUnit: String,
+        portionValue: Double,
         estimatedGramsLikely: Int,
         confidence: String
     ) {
@@ -136,9 +134,8 @@ public final class MealItem {
         self.eventId = eventId
         self.nameDetected = nameDetected
         self.nameNormalized = nameNormalized
-        self.portionLabel = portionLabel
-        self.estimatedGramsLow = estimatedGramsLow
-        self.estimatedGramsHigh = estimatedGramsHigh
+        self.portionUnit = portionUnit
+        self.portionValue = portionValue
         self.estimatedGramsLikely = estimatedGramsLikely
         self.confidence = confidence
     }
@@ -208,9 +205,8 @@ public final class PersonalMemory {
     public var userId: String
     public var foodSignature: String
     public var displayName: String
-    public var usualPortionLabel: String?
-    public var usualCaloriesLow: Int
-    public var usualCaloriesHigh: Int
+    public var usualPortionUnit: String?
+    public var usualPortionValue: Double?
     public var usualCaloriesLikely: Int
     public var correctionCount: Int
     public var confidenceScore: Int
@@ -221,9 +217,8 @@ public final class PersonalMemory {
         userId: String,
         foodSignature: String,
         displayName: String,
-        usualPortionLabel: String? = nil,
-        usualCaloriesLow: Int,
-        usualCaloriesHigh: Int,
+        usualPortionUnit: String? = nil,
+        usualPortionValue: Double? = nil,
         usualCaloriesLikely: Int,
         correctionCount: Int = 0,
         confidenceScore: Int = 50,
@@ -233,9 +228,8 @@ public final class PersonalMemory {
         self.userId = userId
         self.foodSignature = foodSignature
         self.displayName = displayName
-        self.usualPortionLabel = usualPortionLabel
-        self.usualCaloriesLow = usualCaloriesLow
-        self.usualCaloriesHigh = usualCaloriesHigh
+        self.usualPortionUnit = usualPortionUnit
+        self.usualPortionValue = usualPortionValue
         self.usualCaloriesLikely = usualCaloriesLikely
         self.correctionCount = correctionCount
         self.confidenceScore = confidenceScore
@@ -288,25 +282,28 @@ public final class DailyRollup {
     }
 }
 
-/// Calibration One-Tap Question structure
+/// Dynamic Calibration Questionnaire UI Contract Structure
 public struct PortionQuestion: Codable, Hashable {
     public let id: String
     public let question: String
     public let options: [String]
     public let defaultOption: String
     public let correctionType: String
+    public let uiType: String           // e.g. "slice_counter", "fraction_picker", "unit_slider", "single_choice"
 
     public init(
         id: String,
         question: String,
         options: [String],
         defaultOption: String,
-        correctionType: String
+        correctionType: String,
+        uiType: String
     ) {
         self.id = id
         self.question = question
         self.options = options
         self.defaultOption = defaultOption
         self.correctionType = correctionType
+        self.uiType = uiType
     }
 }

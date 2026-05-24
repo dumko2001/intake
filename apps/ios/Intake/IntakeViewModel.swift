@@ -86,10 +86,10 @@ public final class IntakeViewModel {
             imageUrl = URL(string: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=1000")
             
             mockItems = [
-                MealItem(eventId: eventId, nameDetected: "Kerala Matta Rice", nameNormalized: "Cooked matta rice", portionLabel: "Large", estimatedGramsLow: 250, estimatedGramsHigh: 350, estimatedGramsLikely: 300, confidence: "High"),
-                MealItem(eventId: eventId, nameDetected: "Fish Curry (Kerala style)", nameNormalized: "Fish curry with coconut gravy", portionLabel: "Medium bowl", estimatedGramsLow: 150, estimatedGramsHigh: 220, estimatedGramsLikely: 180, confidence: "Medium"),
-                MealItem(eventId: eventId, nameDetected: "Cabbage Thoran", nameNormalized: "Cabbage thoran with shredded coconut", portionLabel: "Small side", estimatedGramsLow: 50, estimatedGramsHigh: 80, estimatedGramsLikely: 65, confidence: "High"),
-                MealItem(eventId: eventId, nameDetected: "Pappadam", nameNormalized: "Fried papadum", portionLabel: "1 piece", estimatedGramsLow: 10, estimatedGramsHigh: 15, estimatedGramsLikely: 12, confidence: "High")
+                MealItem(eventId: eventId, nameDetected: "Kerala Matta Rice", nameNormalized: "Cooked matta rice", portionUnit: "cup", portionValue: 1.5, estimatedGramsLikely: 300, confidence: "High"),
+                MealItem(eventId: eventId, nameDetected: "Fish Curry (Kerala style)", nameNormalized: "Fish curry with coconut gravy", portionUnit: "bowl", portionValue: 1.0, estimatedGramsLikely: 180, confidence: "Medium"),
+                MealItem(eventId: eventId, nameDetected: "Cabbage Thoran", nameNormalized: "Cabbage thoran with shredded coconut", portionUnit: "bowl", portionValue: 0.5, estimatedGramsLikely: 65, confidence: "High"),
+                MealItem(eventId: eventId, nameDetected: "Pappadam", nameNormalized: "Fried papadum", portionUnit: "piece", portionValue: 1.0, estimatedGramsLikely: 12, confidence: "High")
             ]
             
             mockEstimate = EstimateVersion(
@@ -110,10 +110,11 @@ public final class IntakeViewModel {
             
             mockQuestion = PortionQuestion(
                 id: "q_rice_qty",
-                question: "Was the Matta Rice serving closer to Small, Medium, or Large?",
-                options: ["Small (fist size / ~150g)", "Medium (bowl size / ~250g)", "Large (loaded plate / ~350g)"],
-                defaultOption: "Large (loaded plate / ~350g)",
-                correctionType: "portion"
+                question: "How many cups of Matta Rice did you serve?",
+                options: ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"],
+                defaultOption: "1.5 cups",
+                correctionType: "portion",
+                uiType: "unit_slider"
             )
             
         case "banana_chips":
@@ -122,7 +123,7 @@ public final class IntakeViewModel {
             imageUrl = URL(string: "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=1000")
             
             mockItems = [
-                MealItem(eventId: eventId, nameDetected: "Kerala Banana Chips (Packaged)", nameNormalized: "Banana chips fried in coconut oil", portionLabel: "1 packet (65g)", estimatedGramsLow: 65, estimatedGramsHigh: 65, estimatedGramsLikely: 65, confidence: "High")
+                MealItem(eventId: eventId, nameDetected: "Kerala Banana Chips (Packaged)", nameNormalized: "Banana chips fried in coconut oil", portionUnit: "packet", portionValue: 1.0, estimatedGramsLikely: 65, confidence: "High")
             ]
             
             mockEstimate = EstimateVersion(
@@ -143,10 +144,11 @@ public final class IntakeViewModel {
             
             mockQuestion = PortionQuestion(
                 id: "q_chips_fraction",
-                question: "Did you eat the entire 65g packet?",
-                options: ["Half packet (~32g)", "Whole packet (65g)", "Two packets (130g)"],
-                defaultOption: "Whole packet (65g)",
-                correctionType: "portion"
+                question: "Did you eat the entire packet?",
+                options: ["Half packet", "Whole packet", "Two packets"],
+                defaultOption: "Whole packet",
+                correctionType: "portion",
+                uiType: "fraction_picker"
             )
             
         case "dosa_backfill":
@@ -155,10 +157,10 @@ public final class IntakeViewModel {
             imageUrl = nil
             
             mockItems = [
-                MealItem(eventId: eventId, nameDetected: "Dosa", nameNormalized: "Standard fermented rice dosa", portionLabel: "2 pieces", estimatedGramsLow: 120, estimatedGramsHigh: 160, estimatedGramsLikely: 140, confidence: "Low"),
-                MealItem(eventId: eventId, nameDetected: "Coconut Chutney", nameNormalized: "Grated coconut chutney", portionLabel: "Small bowl", estimatedGramsLow: 40, estimatedGramsHigh: 70, estimatedGramsLikely: 50, confidence: "Low"),
-                MealItem(eventId: eventId, nameDetected: "Sambar", nameNormalized: "Lentil vegetable sambar", portionLabel: "Small bowl", estimatedGramsLow: 100, estimatedGramsHigh: 150, estimatedGramsLikely: 120, confidence: "Low"),
-                MealItem(eventId: eventId, nameDetected: "South Indian Filter Coffee", nameNormalized: "Filter coffee with whole milk", portionLabel: "1 tumbler", estimatedGramsLow: 120, estimatedGramsHigh: 150, estimatedGramsLikely: 135, confidence: "Low")
+                MealItem(eventId: eventId, nameDetected: "Dosa", nameNormalized: "Standard fermented rice dosa", portionUnit: "piece", portionValue: 2.0, estimatedGramsLikely: 140, confidence: "Low"),
+                MealItem(eventId: eventId, nameDetected: "Coconut Chutney", nameNormalized: "Grated coconut chutney", portionUnit: "bowl", portionValue: 0.5, estimatedGramsLikely: 50, confidence: "Low"),
+                MealItem(eventId: eventId, nameDetected: "Sambar", nameNormalized: "Lentil vegetable sambar", portionUnit: "bowl", portionValue: 0.5, estimatedGramsLikely: 120, confidence: "Low"),
+                MealItem(eventId: eventId, nameDetected: "South Indian Filter Coffee", nameNormalized: "Filter coffee with whole milk", portionUnit: "tumbler", portionValue: 1.0, estimatedGramsLikely: 135, confidence: "Low")
             ]
             
             mockEstimate = EstimateVersion(
@@ -186,7 +188,8 @@ public final class IntakeViewModel {
                 question: "Were the dosas prepared with Ghee/Butter?",
                 options: ["Standard/Dry dosa (very little oil)", "Ghee dosa (brushed generously)", "Butter dosa (crispy/thick)"],
                 defaultOption: "Standard/Dry dosa (very little oil)",
-                correctionType: "ghee_amount"
+                correctionType: "ghee_amount",
+                uiType: "single_choice"
             )
             
         default:
@@ -295,12 +298,14 @@ public final class IntakeViewModel {
         savedEstimates[event.id] = estimate
         
         if event.id.uuidString.contains("kerala") == true || activeQuestion?.id == "q_rice_qty" {
-            let label = selectedCorrectionOption.split(separator: " ").first.map(String.init) ?? "Large"
+            let label = selectedCorrectionOption.split(separator: " ").first.map(String.init) ?? "1.5"
+            let val = Double(label) ?? 1.5
             updateMemory(
                 signature: "home_lunch_matta_rice",
                 displayName: "Amma's Matta Rice",
-                portion: label,
-                likelyKcal: label == "Small" ? 210 : (label == "Medium" ? 330 : 430)
+                portionUnit: "cup",
+                portionValue: val,
+                likelyKcal: val < 1.0 ? 210 : (val < 1.5 ? 330 : 430)
             )
         }
         
@@ -352,9 +357,10 @@ public final class IntakeViewModel {
         }
     }
     
-    private func updateMemory(signature: String, displayName: String, portion: String, likelyKcal: Int) {
+    private func updateMemory(signature: String, displayName: String, portionUnit: String, portionValue: Double, likelyKcal: Int) {
         if let idx = personalMemory.firstIndex(where: { $0.foodSignature == signature }) {
-            personalMemory[idx].usualPortionLabel = portion
+            personalMemory[idx].usualPortionUnit = portionUnit
+            personalMemory[idx].usualPortionValue = portionValue
             personalMemory[idx].usualCaloriesLikely = likelyKcal
             personalMemory[idx].correctionCount += 1
             personalMemory[idx].confidenceScore = min(98, personalMemory[idx].confidenceScore + 2)
@@ -364,9 +370,8 @@ public final class IntakeViewModel {
                 userId: "usr_sidharth_902",
                 foodSignature: signature,
                 displayName: displayName,
-                usualPortionLabel: portion,
-                usualCaloriesLow: likelyKcal - 50,
-                usualCaloriesHigh: likelyKcal + 50,
+                usualPortionUnit: portionUnit,
+                usualPortionValue: portionValue,
                 usualCaloriesLikely: likelyKcal,
                 correctionCount: 1,
                 confidenceScore: 55
@@ -433,10 +438,10 @@ public final class IntakeViewModel {
         }
         
         personalMemory = [
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "home_lunch_matta_rice", displayName: "Amma's Matta Rice", usualPortionLabel: "Large", usualCaloriesLow: 380, usualCaloriesHigh: 480, usualCaloriesLikely: 430, correctionCount: 7, confidenceScore: 89),
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "home_fish_curry_coconut", displayName: "Amma's Fish Curry", usualPortionLabel: "Medium bowl", usualCaloriesLow: 180, usualCaloriesHigh: 260, usualCaloriesLikely: 220, correctionCount: 5, confidenceScore: 84),
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "breakfast_dosa_home", displayName: "Home Dosa", usualPortionLabel: "2 pieces", usualCaloriesLow: 220, usualCaloriesHigh: 300, usualCaloriesLikely: 260, correctionCount: 12, confidenceScore: 95),
-            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "filter_coffee_standard", displayName: "South Indian Filter Coffee", usualPortionLabel: "1 tumbler", usualCaloriesLow: 90, usualCaloriesHigh: 130, usualCaloriesLikely: 110, correctionCount: 19, confidenceScore: 92)
+            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "home_lunch_matta_rice", displayName: "Amma's Matta Rice", usualPortionUnit: "cup", usualPortionValue: 1.5, usualCaloriesLikely: 430, correctionCount: 7, confidenceScore: 89),
+            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "home_fish_curry_coconut", displayName: "Amma's Fish Curry", usualPortionUnit: "bowl", usualPortionValue: 1.0, usualCaloriesLikely: 220, correctionCount: 5, confidenceScore: 84),
+            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "breakfast_dosa_home", displayName: "Home Dosa", usualPortionUnit: "piece", usualPortionValue: 2.0, usualCaloriesLikely: 260, correctionCount: 12, confidenceScore: 95),
+            PersonalMemory(userId: "usr_sidharth_902", foodSignature: "filter_coffee_standard", displayName: "South Indian Filter Coffee", usualPortionUnit: "tumbler", usualPortionValue: 1.0, usualCaloriesLikely: 110, correctionCount: 19, confidenceScore: 92)
         ]
     }
 }

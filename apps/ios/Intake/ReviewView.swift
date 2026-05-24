@@ -171,7 +171,7 @@ public struct ReviewView: View {
                         
                         let tagLabel = (item.nameDetected.contains("Matta Rice") && !viewModel.selectedCorrectionOption.isEmpty)
                             ? String(viewModel.selectedCorrectionOption.split(separator: " ").first ?? "Large")
-                            : item.portionLabel
+                            : (item.portionValue > 0 ? "\(item.portionValue) \(item.portionUnit)" : item.portionUnit)
                         
                         Text(tagLabel)
                             .font(.system(size: 10, weight: .bold, design: .rounded))
