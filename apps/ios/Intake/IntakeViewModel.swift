@@ -22,7 +22,6 @@ public enum AppActiveView {
 @Observable
 @MainActor
 public final class IntakeViewModel {
-    // Endpoints pointing to your live serverless Cloudflare Workers
     private let signerUrl = URL(string: "https://r2-signer.tallyup-invoices.workers.dev")!
     private let analyzerUrl = URL(string: "https://ai-analyzer.tallyup-invoices.workers.dev")!
     
@@ -67,27 +66,26 @@ public final class IntakeViewModel {
     )
     
     public init() {
-        // Initial sync of rollups and history from Cloudflare D1
         Task {
             await fetchTelemetry()
         }
     }
     
-    // MARK: - Ingestion Pipeline (Cloudflare Edge Worker + Gemini Files API)
+    // MARK: - Ingestion Pipeline (Stateless parsing via Edge Ingest API)
     
     public func triggerCapture(flowId: String) {
         processingError = nil
         activeView = .analyzing
-        analysisStage = 1 // Media ingestion & upload
+        analysisStage = 1 // Media upload phase
         
         let eventId = UUID()
         let userId = "usr_sidharth_902"
         let now = Date()
         
-        // Define default mock meal visual properties to fetch and upload natively to D1/R2
         var visualUrlString = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600"
         var noteText: String? = nil
         var captureType: CaptureType = .photo
+        var barcodeStr: String? = nil
         
         switch flowId {
         case "kerala_lunch":
@@ -98,6 +96,7 @@ public final class IntakeViewModel {
             visualUrlString = "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=600"
             noteText = "Snacking on packaged chips at desk"
             captureType = .photo
+            barcodeStr = "8901539200212" // standard mock barcode trigger
         case "dosa_backfill":
             visualUrlString = "https://images.unsplash.com/photo-1668236543090-82eba5ee5976?w=600"
             noteText = "Dosas with coconut chutney, filter coffee"
@@ -124,30 +123,27 @@ public final class IntakeViewModel {
         Task {
             do {
                 if !isOnline {
-                    // Offline fallback: save event locally
                     try await Task.sleep(nanoseconds: 1_500_000_000)
                     saveMealOffline(event: newEvent)
                     return
                 }
                 
-                // 1. Fetch raw asset binary
-                guard let assetUrl = URL(string: visualUrlString) else {
-                    throw NSError(domain: "Intake", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid asset source URL"])
-                }
-                
-                let (imageData, _) = try await URLSession.shared.data(from: assetUrl)
-                
-                // 2. Request R2 Upload Presigned URL from r2-signer
+                // 1. Request R2 Upload Presigned URL
                 let signerRequest = try createSignerRequest(eventId: eventId, mimeType: "image/jpeg")
                 let (signerData, signerRes) = try await URLSession.shared.data(for: signerRequest)
                 
                 guard (signerRes as? HTTPURLResponse)?.statusCode == 200 else {
-                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 presigned URL authorization failed"])
+                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 upload authorization rejected"])
                 }
                 
                 let signerPayload = try JSONDecoder().decode(SignerResponse.self, from: signerData)
                 
-                // 3. Upload Binary Image strictly zero-Base64 directly to R2 bucket
+                // 2. Fetch raw visual binary and upload to R2
+                guard let assetUrl = URL(string: visualUrlString) else {
+                    throw NSError(domain: "Intake", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid asset source URL"])
+                }
+                let (imageData, _) = try await URLSession.shared.data(from: assetUrl)
+                
                 var uploadRequest = URLRequest(url: URL(string: signerPayload.upload_url)!)
                 uploadRequest.httpMethod = "PUT"
                 uploadRequest.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
@@ -155,13 +151,12 @@ public final class IntakeViewModel {
                 
                 let (_, uploadRes) = try await URLSession.shared.data(for: uploadRequest)
                 guard (uploadRes as? HTTPURLResponse)?.statusCode == 200 else {
-                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 PUT asset streaming failed"])
+                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 direct upload streaming failed"])
                 }
                 
-                // 4. Handle optional simulated audio voice note upload
+                // 3. Handle optional simulated audio recording upload
                 var r2AudioUrl: String? = nil
                 if voiceAnnotationEnabled && flowId == "kerala_lunch" {
-                    // Create simulated audio note binary representing vocal calibration
                     let mockAudioText = "This is Kerala Matta Rice, about 1.5 cups, with standard fish curry and Thoran."
                     let mockAudioData = mockAudioText.data(using: .utf8)!
                     
@@ -180,9 +175,9 @@ public final class IntakeViewModel {
                     }
                 }
                 
-                self.analysisStage = 2 // Multimodal edge model parsing
+                self.analysisStage = 2 // Running multimodal edge parsing
                 
-                // 5. Invoke Edge Ingest Pipeline
+                // 4. Hit Edge Stateless Ingest Endpoint (Does NOT write to D1!)
                 let ingestPayload = IngestRequest(
                     event_id: eventId.uuidString,
                     user_id: userId,
@@ -192,10 +187,11 @@ public final class IntakeViewModel {
                     meal_time: getFormattedTime(date: now),
                     meal_type: newEvent.mealType.rawValue,
                     capture_type: captureType.rawValue,
-                    raw_text_note: noteText
+                    raw_text_note: noteText,
+                    barcode: barcodeStr
                 )
                 
-                var ingestRequest = URLRequest(url: analyzerUrl)
+                var ingestRequest = URLRequest(url: analyzerUrl.appendingPathComponent("api/ingest"))
                 ingestRequest.httpMethod = "POST"
                 ingestRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 ingestRequest.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
@@ -203,14 +199,13 @@ public final class IntakeViewModel {
                 
                 let (ingestData, ingestRes) = try await URLSession.shared.data(for: ingestRequest)
                 guard (ingestRes as? HTTPURLResponse)?.statusCode == 200 else {
-                    let errStr = String(data: ingestData, encoding: .utf8) ?? "Unknown Ingestion pipeline failure"
+                    let errStr = String(data: ingestData, encoding: .utf8) ?? "Ingestion pipeline returned rejection code"
                     throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: errStr])
                 }
                 
-                self.analysisStage = 3 // Calibrating layout structures
+                self.analysisStage = 3 // Standard UI calibration
                 let analysis = try JSONDecoder().decode(IngestResponse.self, from: ingestData)
                 
-                // Establish structured records returned by Gemini D1 database execution
                 self.activeItems = analysis.detected_items.map { item in
                     MealItem(
                         eventId: eventId,
@@ -227,7 +222,7 @@ public final class IntakeViewModel {
                     eventId: eventId,
                     modelProvider: "google-ai",
                     modelName: "gemini-3.5-flash",
-                    promptVersion: "v2.1",
+                    promptVersion: "v2.2",
                     nutritionEngineVersion: "vision-v1",
                     caloriesLow: analysis.estimates.calories_low,
                     caloriesHigh: analysis.estimates.calories_high,
@@ -243,8 +238,6 @@ public final class IntakeViewModel {
                 self.activeQuestion = analysis.one_question
                 self.selectedCorrectionOption = analysis.one_question?.defaultOption ?? ""
                 
-                // Save locally
-                newEvent.status = .analyzed
                 newEvent.primaryImageUrl = URL(string: signerPayload.public_url)
                 
                 try await Task.sleep(nanoseconds: 500_000_000)
@@ -254,12 +247,12 @@ public final class IntakeViewModel {
                 self.processingError = error.localizedDescription
                 self.activeView = .camera
                 self.activeEvent = nil
-                print("INGEST ERROR:", error.localizedDescription)
+                print("INGEST FAILS:", error.localizedDescription)
             }
         }
     }
     
-    // MARK: - Rapid Text-Only Prompt-Cached Recompute
+    // MARK: - Recomputation Loop (Stateless text-only cached shifts)
     
     public func selectCorrection(option: String) {
         guard let event = activeEvent, let currentEstimate = activeEstimate else { return }
@@ -304,13 +297,12 @@ public final class IntakeViewModel {
                 
                 let (resData, res) = try await URLSession.shared.data(for: req)
                 guard (res as? HTTPURLResponse)?.statusCode == 200 else {
-                    print("Recompute query rejected by Edge API")
+                    print("Recompute transaction rejected by Edge API")
                     return
                 }
                 
                 let payload = try JSONDecoder().decode(RecomputeResponse.self, from: resData)
                 
-                // Spring animate calorie and macro shifts instantly!
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                     currentEstimate.caloriesLow = payload.estimates.calories_low
                     currentEstimate.caloriesHigh = payload.estimates.calories_high
@@ -321,6 +313,12 @@ public final class IntakeViewModel {
                     currentEstimate.fiberG = payload.estimates.fiber_g
                     currentEstimate.confidenceScore = payload.estimates.confidence_score
                     currentEstimate.uncertaintyReasons = payload.estimates.uncertainty_reasons
+                    
+                    // Proportional scale on detected portions!
+                    if let firstItem = self.activeItems.first {
+                        let scale = Double(payload.estimates.calories_likely) / Double(recomputePayload.previous_estimates.calories_likely)
+                        firstItem.portionValue = (firstItem.portionValue * scale * 100).rounded() / 100.0
+                    }
                 }
             } catch {
                 print("RECOMPUTE NET FAILURE:", error.localizedDescription)
@@ -328,29 +326,76 @@ public final class IntakeViewModel {
         }
     }
     
-    // MARK: - Save Log Coordinates
+    // MARK: - Save Meal Action (Triggers explicit D1 transaction)
     
     public func saveMeal() {
         guard let event = activeEvent, let estimate = activeEstimate else { return }
         
-        event.status = .saved
-        
-        savedEvents.insert(event, at: 0)
-        savedItems[event.id] = activeItems
-        savedEstimates[event.id] = estimate
-        
-        // Refresh telemetry database stats dynamically
         Task {
-            await fetchTelemetry()
-        }
-        
-        // Complete the feedback loop and transition back to camera
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-            activeView = .camera
-            activeEvent = nil
-            activeEstimate = nil
-            activeItems = []
-            activeQuestion = nil
+            do {
+                // Compile transaction payload for `/api/save`
+                let transaction = SaveTransactionRequest(
+                    event_id: event.id.uuidString,
+                    user_id: event.userId,
+                    meal_time: event.mealTime,
+                    meal_type: event.mealType.rawValue,
+                    capture_type: event.captureType.rawValue,
+                    raw_text_note: event.rawTextNote,
+                    image_url: event.primaryImageUrl?.absoluteString,
+                    items: activeItems.map { item in
+                        DetectedItem(
+                            name_detected: item.nameDetected,
+                            name_normalized: item.nameNormalized,
+                            portion_unit: item.portionUnit,
+                            portion_value: item.portionValue,
+                            estimated_grams_likely: item.estimatedGramsLikely,
+                            confidence: item.confidence
+                        )
+                    },
+                    estimates: RecomputeEstimates(
+                        calories_low: estimate.caloriesLow,
+                        calories_high: estimate.caloriesHigh,
+                        calories_likely: estimate.caloriesLikely,
+                        protein_g: estimate.proteinG,
+                        carbs_g: estimate.carbsG,
+                        fat_g: estimate.fatG,
+                        fiber_g: estimate.fiberG,
+                        confidence_score: estimate.confidenceScore,
+                        uncertainty_reasons: estimate.uncertaintyReasons
+                    )
+                )
+                
+                var req = URLRequest(url: analyzerUrl.appendingPathComponent("api/save"))
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
+                req.httpBody = try JSONEncoder().encode(transaction)
+                
+                let (_, res) = try await URLSession.shared.data(for: req)
+                guard (res as? HTTPURLResponse)?.statusCode == 200 else {
+                    print("Edge database transaction save rejected")
+                    return
+                }
+                
+                // Commit locally
+                event.status = .saved
+                savedEvents.insert(event, at: 0)
+                savedItems[event.id] = activeItems
+                savedEstimates[event.id] = estimate
+                
+                await fetchTelemetry()
+                
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    activeView = .camera
+                    activeEvent = nil
+                    activeEstimate = nil
+                    activeItems = []
+                    activeQuestion = nil
+                }
+                
+            } catch {
+                print("TRANSACTION COMMITTED FAILS:", error.localizedDescription)
+            }
         }
     }
     
@@ -365,7 +410,7 @@ public final class IntakeViewModel {
         }
     }
     
-    // MARK: - Database Rollups Synchronizations (Cloud D1 GET Endpoints)
+    // MARK: - Synchronize Telemetry D1 GET routes
     
     public func fetchTelemetry() async {
         guard isOnline else { return }
@@ -373,7 +418,6 @@ public final class IntakeViewModel {
         do {
             let userId = "usr_sidharth_902"
             
-            // 1. Fetch D1 SQLite Event Ledger history
             let historyUrl = analyzerUrl.appending(path: "api/history").appending(queryItems: [URLQueryItem(name: "user_id", value: userId)])
             var histReq = URLRequest(url: historyUrl)
             histReq.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
@@ -431,7 +475,6 @@ public final class IntakeViewModel {
                 }
             }
             
-            // 2. Fetch D1 SQLite rollups
             let rollupUrl = analyzerUrl.appending(path: "api/rollup").appending(queryItems: [URLQueryItem(name: "user_id", value: userId)])
             var rollReq = URLRequest(url: rollupUrl)
             rollReq.setValue("Bearer intake_secure_shield_902", forHTTPHeaderField: "Authorization")
@@ -499,158 +542,16 @@ public final class IntakeViewModel {
     }
 }
 
-// MARK: - Ingestion Networking Contracts
+// MARK: - Save SQL Transaction Request Contract
 
-struct SignerRequest: Codable {
-    let event_id: String
-    let mime_type: String
-    let file_extension: String
-}
-
-struct SignerResponse: Codable {
-    let upload_url: String
-    let r2_key: String
-    let public_url: String
-}
-
-struct IngestRequest: Codable {
+struct SaveTransactionRequest: Codable {
     let event_id: String
     let user_id: String
-    let image_url: String
-    let audio_url: String?
-    let model_name: String
     let meal_time: String
     let meal_type: String
     let capture_type: String
     let raw_text_note: String?
-}
-
-struct DetectedItem: Codable {
-    let name_detected: String
-    let name_normalized: String
-    let portion_unit: String
-    let portion_value: Double
-    let estimated_grams_likely: Int
-    let confidence: String
-}
-
-struct IngestEstimates: Codable {
-    let calories_low: Int
-    let calories_high: Int
-    let calories_likely: Int
-    let protein_g: Int
-    let carbs_g: Int
-    let fat_g: Int
-    let fiber_g: Int?
-    let confidence_score: Int
-    let uncertainty_reasons: [String]
-}
-
-struct IngestResponse: Codable {
-    let meal_type: String
-    let detected_items: [DetectedItem]
-    let estimates: IngestEstimates
-    let one_question: PortionQuestion?
-}
-
-// MARK: - Recomputation Contracts
-
-struct RecomputeRequest: Codable {
-    let action: String
-    let event_id: String
-    let user_id: String
-    let selection_option: String
-    let original_detected_items: [DetectedItem]
-    let previous_estimates: RecomputeEstimates
-}
-
-struct RecomputeEstimates: Codable {
-    let calories_low: Int
-    let calories_high: Int
-    let calories_likely: Int
-    let protein_g: Int
-    let carbs_g: Int
-    let fat_g: Int
-    let fiber_g: Int?
-    let confidence_score: Int
-    let uncertainty_reasons: [String]
-}
-
-struct RecomputeResponse: Codable {
-    let event_id: String
+    let image_url: String?
+    let items: [DetectedItem]
     let estimates: RecomputeEstimates
-}
-
-// MARK: - D1 Database Pull Decoders
-
-struct D1EnrichedEvent: Codable {
-    let id: String
-    let user_id: String
-    let created_at: String
-    let meal_time: String
-    let meal_type: String
-    let capture_type: String
-    let status: String
-    let raw_text_note: String?
-    let primary_image_url: String?
-    let thumbnail_url: String?
-    let items: [D1Item]
-    let latest_estimate: D1Estimate?
-}
-
-struct D1Item: Codable {
-    let name_detected: String
-    let name_normalized: String
-    let portion_unit: String
-    let portion_value: Double
-    let estimated_grams_likely: Int
-    let confidence: String
-}
-
-struct D1Estimate: Codable {
-    let model_provider: String
-    let model_name: String
-    let prompt_version: String
-    let nutrition_engine_version: String
-    let calories_low: Int
-    let calories_high: Int
-    let calories_likely: Int
-    let protein_g: Int
-    let carbs_g: Int
-    let fat_g: Int
-    let fiber_g: Int?
-    let confidence_score: Int
-    let uncertainty_reasons: String
-}
-
-struct D1Rollup: Codable {
-    let user_id: String
-    let date: String
-    let calories_low: Int
-    let calories_high: Int
-    let calories_likely: Int
-    let protein_g: Int
-    let carbs_g: Int
-    let fat_g: Int
-    let events_count: Int
-    let photo_logs_count: Int
-    let no_image_logs_count: Int
-    let confidence_score: Int
-}
-
-// MARK: - Date Formatting Helpers
-
-extension DateFormatter {
-    static let iso8601: DateFormatter = {
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
-        df.locale = Locale(identifier: "en_US_POSIX")
-        return df
-    }()
-    
-    static let yyyyMMdd: DateFormatter = {
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd"
-        return df
-    }()
 }

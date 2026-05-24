@@ -122,13 +122,3 @@ CREATE TABLE IF NOT EXISTS otp_codes (
     code TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 );
-
--- 9. Edge-Constrained High-Speed Telemetry Log (Signal Only)
-CREATE TABLE IF NOT EXISTS telemetry_logs (
-    id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    duration_ms INTEGER NOT NULL,
-    tokens_used INTEGER,
-    error_message TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
