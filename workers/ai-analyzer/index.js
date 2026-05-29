@@ -28,11 +28,11 @@ export default {
 
     const validateHost = (urlStr) => {
       const parsed = new URL(urlStr);
-      const allowedHosts = [
-        env.CDN_DOMAIN || "intake-media.57014886c6cd87ebacf23a94e56a6e0c.r2.cloudflarestorage.com",
-        "images.unsplash.com",
-        "generativelanguage.googleapis.com"
-      ];
+        const allowedHosts = [
+          env.CDN_DOMAIN || "intake-media.57014886c6cd87ebacf23a94e56a6e0c.r2.cloudflarestorage.com",
+          env.MEDIA_WORKER_DOMAIN || "r2-signer.tallyup-invoices.workers.dev",
+          "generativelanguage.googleapis.com"
+        ];
       const isAllowed = allowedHosts.some(host => parsed.hostname === host || parsed.hostname.endsWith(host));
       if (!isAllowed) {
         throw new Error(`SSRF Blocked: URL host ${parsed.hostname} is forbidden`);
@@ -44,6 +44,100 @@ export default {
       if (!uuidRegex.test(uuid)) {
         throw new Error("Invalid UUID structure");
       }
+    };
+
+    const isSafeObjectKey = (key) => /^meals\/[0-9a-f-]{36}\/analysis_[0-9]+\.[a-zA-Z0-9]+$/i.test(key || "");
+
+    const localDateString = (timeZone = "Asia/Kolkata") => {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).formatToParts(new Date());
+      const part = (type) => parts.find(item => item.type === type)?.value;
+      return `${part("year")}-${part("month")}-${part("day")}`;
+    };
+
+    const normalizeEstimates = (estimates = {}) => ({
+      calories_low: Math.round(estimates.caloriesLow ?? estimates.calories_low ?? 0),
+      calories_high: Math.round(estimates.caloriesHigh ?? estimates.calories_high ?? 0),
+      calories_likely: Math.round(estimates.caloriesLikely ?? estimates.calories_likely ?? 0),
+      protein_g: Math.round(estimates.proteinG ?? estimates.protein_g ?? 0),
+      carbs_g: Math.round(estimates.carbsG ?? estimates.carbs_g ?? 0),
+      fat_g: Math.round(estimates.fatG ?? estimates.fat_g ?? 0),
+      fiber_g: Math.round(estimates.fiberG ?? estimates.fiber_g ?? 0),
+      confidence_score: Math.round(estimates.confidenceScore ?? estimates.confidence_score ?? 0),
+      uncertainty_reasons: estimates.uncertaintyReasons ?? estimates.uncertainty_reasons ?? []
+    });
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const generateGeminiContent = async (model, body) => {
+      const bodyJson = JSON.stringify(body);
+      const gatewayUrl = `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_GATEWAY_NAME}/google-ai-studio/v1/models/${model}:generateContent`;
+      const gatewayHeaders = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": env.GEMINI_API_KEY
+      };
+      if (env.CF_AIG_TOKEN) {
+        gatewayHeaders["cf-aig-authorization"] = `Bearer ${env.CF_AIG_TOKEN}`;
+      }
+
+      const gatewayResponse = await fetch(gatewayUrl, {
+        method: "POST",
+        headers: gatewayHeaders,
+        body: bodyJson
+      });
+      if (gatewayResponse.ok) {
+        return gatewayResponse;
+      }
+
+      const gatewayError = await gatewayResponse.text();
+      const directUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+      let directResponse = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        directResponse = await fetch(directUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: bodyJson
+        });
+        if (directResponse.ok || ![429, 500, 502, 503, 504].includes(directResponse.status)) {
+          break;
+        }
+        await sleep(attempt * 650);
+      }
+
+      directResponse.gatewayError = gatewayError;
+      directResponse.gatewayStatus = gatewayResponse.status;
+      return directResponse;
+    };
+
+    const fetchMediaWithRetry = async (mediaUrl) => {
+      let lastStatus = 0;
+      let lastMessage = "";
+
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          const response = await fetch(mediaUrl, {
+            headers: { "Cache-Control": "no-cache" }
+          });
+          lastStatus = response.status;
+          if (response.ok) {
+            return response;
+          }
+          lastMessage = await response.text().catch(() => "");
+        } catch (error) {
+          lastMessage = error.message;
+        }
+
+        await sleep(attempt * 300);
+      }
+
+      const error = new Error("Uploaded photo was not readable yet. Please retry with a fresh photo.");
+      error.status = 502;
+      error.details = { lastStatus, lastMessage };
+      throw error;
     };
 
     try {
@@ -131,7 +225,7 @@ export default {
         validateUUID(event_id);
 
         const recomputePrompt = `
-          You are the Nutrition Recalibration stage of the "Intake" personal nutrition telemetry system.
+          You are the Nutrition Recalibration stage for the Intake app.
           The user has responded to your dynamic portion calibration question.
           
           === INITIAL PARSING ESTIMATES ===
@@ -162,29 +256,20 @@ export default {
           }
         `;
 
-        const gatewayUrl = `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_GATEWAY_NAME}/google-ai-studio/v1beta/models/gemini-2.5-flash:generateContent`;
-
-        const geminiResponse = await fetch(gatewayUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": env.GEMINI_API_KEY
-          },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: recomputePrompt }] }],
-            generationConfig: { responseMimeType: "application/json" }
-          })
+        const geminiResponse = await generateGeminiContent("gemini-2.5-flash", {
+          contents: [{ parts: [{ text: recomputePrompt }] }],
+          generationConfig: { responseMimeType: "application/json" }
         });
 
         if (!geminiResponse.ok) {
           const errorText = await geminiResponse.text();
-          throw new Error(`Gemini Recompute failed via Gateway: ${geminiResponse.status} - ${errorText}`);
+          throw new Error(`Gemini Recompute failed: ${geminiResponse.status} - ${errorText}; gateway ${geminiResponse.gatewayStatus || "not attempted"} - ${geminiResponse.gatewayError || "ok"}`);
         }
 
         const geminiData = await geminiResponse.json();
         const rawText = geminiData.candidates[0].content.parts[0].text;
         const parsed = JSON.parse(rawText.trim());
-        const newEstimates = parsed.estimates;
+        const newEstimates = normalizeEstimates(parsed.estimates);
 
         return new Response(JSON.stringify({ event_id, estimates: newEstimates }), {
           status: 200,
@@ -196,7 +281,8 @@ export default {
       // ROUTE 4: POST /api/save (Commit final transaction ledger in D1)
       // =======================================================================
       if (path === "/api/save") {
-        const { event_id, user_id, meal_time, meal_type, capture_type, raw_text_note, image_url, items, estimates } = payload;
+        const { event_id, user_id, meal_time, meal_type, capture_type, raw_text_note, image_url, items } = payload;
+        const estimates = normalizeEstimates(payload.estimates);
 
         if (!event_id || !user_id || !items || !estimates) {
           return new Response(
@@ -264,7 +350,7 @@ export default {
           primaryEstId,
           event_id,
           "google-ai",
-          "gemini-3.5-flash",
+          "gemini-2.5-flash",
           "v2.2",
           "ledger-v1",
           estimates.caloriesLow || estimates.calories_low,
@@ -279,7 +365,7 @@ export default {
         ).run();
 
         // 4. Update aggregates daily rollup
-        const todayDate = new Date().toISOString().split("T")[0];
+        const todayDate = localDateString("Asia/Kolkata");
         const isPhoto = image_url ? 1 : 0;
         const isNoPhoto = image_url ? 0 : 1;
 
@@ -330,7 +416,7 @@ export default {
       // ROUTE 5: POST /api/ingest (Standard Media/Barcode Ingestion - Stateless)
       // =======================================================================
       if (path === "/api/ingest" || path === "/") {
-        const { event_id, user_id, image_url, audio_url, model_name, barcode } = payload;
+        const { event_id, user_id, image_url, r2_key, image_base64, audio_url, model_name, barcode, raw_text_note, meal_type, capture_type } = payload;
 
         if (!event_id || !user_id) {
           return new Response(
@@ -344,15 +430,32 @@ export default {
         // --- BRANCH A: Barcode routing via Open Food Facts API ---
         if (barcode) {
           const barcodeClean = barcode.trim();
-          const offUrl = `https://world.openfoodfacts.org/api/v2/product/${barcodeClean}`;
+          const barcodeLookupStatuses = [];
+          const offUrls = [
+            `https://api.openfoodfacts.org/api/v2/product/${barcodeClean}?fields=product_name,generic_name,ingredients_text,allergens_from_ingredients,additives_tags,nutriments,serving_size,serving_quantity`,
+            `https://ssl-api.openfoodfacts.org/api/v2/product/${barcodeClean}?fields=product_name,generic_name,ingredients_text,allergens_from_ingredients,additives_tags,nutriments,serving_size,serving_quantity`,
+            `https://world.openfoodfacts.org/api/v2/product/${barcodeClean}?fields=product_name,generic_name,ingredients_text,allergens_from_ingredients,additives_tags,nutriments,serving_size,serving_quantity`,
+            `https://us.openfoodfacts.org/api/v2/product/${barcodeClean}?fields=product_name,generic_name,ingredients_text,allergens_from_ingredients,additives_tags,nutriments,serving_size,serving_quantity`,
+            `https://in.openfoodfacts.org/api/v2/product/${barcodeClean}?fields=product_name,generic_name,ingredients_text,allergens_from_ingredients,additives_tags,nutriments,serving_size,serving_quantity`,
+            `https://world.openfoodfacts.org/api/v0/product/${barcodeClean}.json`
+          ];
           
           try {
-            const offRes = await fetch(offUrl, {
-              headers: { "User-Agent": "IntakeApp - iOS - Version 1.0" }
-            });
-            
-            if (offRes.ok) {
+            for (const offUrl of offUrls) {
+              const offRes = await fetch(offUrl, {
+                headers: {
+                  "Accept": "application/json",
+                  "User-Agent": "Intake iOS/1.0 (nutrition logging; contact: support@tallyup.app)"
+                }
+              });
+
+              if (!offRes.ok) {
+                barcodeLookupStatuses.push(`${new URL(offUrl).hostname}:${offRes.status}`);
+                continue;
+              }
+
               const offData = await offRes.json();
+              barcodeLookupStatuses.push(`${new URL(offUrl).hostname}:ok:${offData.status || "no-status"}`);
               if (offData.status === 1 && offData.product) {
                 const prod = offData.product;
                 const name = prod.product_name || "Packaged Food Product";
@@ -370,7 +473,7 @@ export default {
                 if (prod.nutriments?.sugars_100g > 15) warnings.push("High sugar warning (>15g / 100g)");
                 if (prod.nutriments?.["saturated-fat_100g"] > 5) warnings.push("High saturated fat warning");
                 
-                const cals = Math.round((prod.nutriments?.["energy-kcal_serving"] || prod.nutriments?.["energy-kcal_100"] || 120));
+                const cals = Math.round((prod.nutriments?.["energy-kcal_serving"] || prod.nutriments?.["energy-kcal_100g"] || 120));
                 const prot = Math.round((prod.nutriments?.proteins_serving || prod.nutriments?.proteins_100g || 2));
                 const carbs = Math.round((prod.nutriments?.carbohydrates_serving || prod.nutriments?.carbohydrates_100g || 15));
                 const fat = Math.round((prod.nutriments?.fat_serving || prod.nutriments?.fat_100g || 3));
@@ -415,20 +518,115 @@ export default {
                 });
               }
             }
-          } catch (_) {
-            // OFF fetch fails: fall through automatically to Gemini visual router!
+          } catch (error) {
+            throw new Error(`Barcode lookup failed: ${error.message}`);
+          }
+
+          if (!image_url && !r2_key && !image_base64) {
+            return new Response(JSON.stringify({
+              error: "Barcode product not found",
+              message: "Barcode was scanned, but this product was not found in Open Food Facts.",
+              lookup_statuses: barcodeLookupStatuses
+            }), {
+              status: 404,
+              headers: { ...corsHeaders, "Content-Type": "application/json" }
+            });
           }
         }
 
-        // --- BRANCH B: Gemini Visual/Audio parser (Barcode Miss or standard photo capture) ---
-        if (!image_url) {
+        // --- BRANCH B: Text-only parser for manual logs ---
+        if (!image_url && !r2_key && !image_base64) {
+          const note = String(raw_text_note || "").trim();
+          const isTextCapture = capture_type === "backfill_text" || capture_type === "backfill_voice";
+          if (!note || !isTextCapture) {
+            return new Response(
+              JSON.stringify({ error: "Missing image asset URL for visual ingestion" }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
+          const textPrompt = `
+            You are the Nutrition Estimation engine for the Intake app.
+            Parse this user-written meal log into ingredients, portions, calories, and macros.
+
+            MEAL LOG:
+            ${note}
+
+            MEAL TYPE:
+            ${meal_type || "lunch"}
+
+            Rules:
+            1. Use conservative estimates and objective portions.
+            2. Do not invent ingredients not implied by the note.
+            3. Ask one useful portion clarification question.
+
+            Return only JSON in this structure:
+            {
+              "meal_type": "breakfast" | "lunch" | "dinner" | "snack",
+              "detected_items": [
+                {
+                  "name_detected": "Food name",
+                  "name_normalized": "normalized food",
+                  "portion_unit": "cup" | "slice" | "bowl" | "piece" | "gram",
+                  "portion_value": 1,
+                  "estimated_grams_likely": 100,
+                  "confidence": "High" | "Medium" | "Low"
+                }
+              ],
+              "estimates": {
+                "calories_low": 300,
+                "calories_high": 500,
+                "calories_likely": 400,
+                "protein_g": 15,
+                "carbs_g": 45,
+                "fat_g": 14,
+                "fiber_g": 5,
+                "confidence_score": 70,
+                "uncertainty_reasons": ["portion entered from text"]
+              },
+              "one_question": {
+                "id": "refine_text_portion",
+                "question": "Which portion is closest?",
+                "options": ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"],
+                "default_option": "1 cup",
+                "correction_type": "portion",
+                "ui_type": "unit_slider"
+              }
+            }
+          `;
+
+          const selectedModel = model_name || env.MODEL_NAME || "gemini-2.5-flash";
+          const geminiResponse = await generateGeminiContent(selectedModel, {
+            contents: [{ parts: [{ text: textPrompt }] }],
+            generationConfig: { responseMimeType: "application/json" }
+          });
+
+          if (!geminiResponse.ok) {
+            const errorText = await geminiResponse.text();
+            throw new Error(`Gemini Text Parse Failed: ${geminiResponse.status} - ${errorText}; gateway ${geminiResponse.gatewayStatus || "not attempted"} - ${geminiResponse.gatewayError || "ok"}`);
+          }
+
+          const geminiData = await geminiResponse.json();
+          const rawTextResult = geminiData.candidates[0].content.parts[0].text;
+          const parsedText = JSON.parse(rawTextResult.trim());
+          parsedText.estimates = normalizeEstimates(parsedText.estimates);
+
+          return new Response(JSON.stringify({ event_id, ...parsedText }), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+
+        // --- BRANCH C: Gemini Visual/Audio parser ---
+        if (image_url) {
+          validateHost(image_url);
+        }
+        if (r2_key && !isSafeObjectKey(r2_key)) {
           return new Response(
-            JSON.stringify({ error: "Missing image asset URL for visual ingestion" }),
+            JSON.stringify({ error: "Invalid image key" }),
             { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
-
-        validateHost(image_url);
         if (audio_url) {
           validateHost(audio_url);
         }
@@ -436,12 +634,25 @@ export default {
         let tempImageName = null;
         let tempAudioName = null;
 
-        const imageResponse = await fetch(image_url);
-        if (!imageResponse.ok) {
-          throw new Error(`Failed to fetch image from URL: ${image_url}`);
+        let imageBuffer;
+        let imageMime = "image/jpeg";
+        if (r2_key) {
+          const object = await env.MEDIA_BUCKET.get(r2_key);
+          if (!object) {
+            return new Response(
+              JSON.stringify({ error: "Photo unavailable", message: "Uploaded photo was not found. Please retake it." }),
+              { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          imageBuffer = await new Response(object.body).arrayBuffer();
+          imageMime = object.httpMetadata?.contentType || "image/jpeg";
+        } else if (image_base64) {
+          imageBuffer = Uint8Array.from(atob(image_base64), char => char.charCodeAt(0)).buffer;
+        } else {
+          const imageResponse = await fetchMediaWithRetry(image_url);
+          imageBuffer = await imageResponse.arrayBuffer();
+          imageMime = imageResponse.headers.get("content-type") || "image/jpeg";
         }
-        const imageBuffer = await imageResponse.arrayBuffer();
-        const imageMime = imageResponse.headers.get("content-type") || "image/jpeg";
 
         const imgBoundary = "intake_boundary_img_upload";
         const imgMetadata = JSON.stringify({ file: { displayName: `Plate ${event_id}`, mimeType: imageMime } });
@@ -511,30 +722,35 @@ export default {
         }
 
         const systemPrompt = `
-          You are the Vision & Nutrition Estimation engine of the "Intake" personal nutrition observatory.
+          You are the Vision and Nutrition Estimation engine for the Intake app.
           Analyze this food image along with the optional raw voice audio annotation.
           Natively listen to the audio file and cross-reference its details with the meal picture to determine ingredients and quantities.
           
           CRITICAL NUTRITION OBSERVATORY INSTRUCTIONS:
-          1. Parse the meal into isolated items with objective, physical units (e.g. portion_unit: "cup", "slice", "bowl", "piece", "gram" and portion_value: 1.5, 2, 350) instead of subjective adjectives like "Large/Medium/Small".
+          1. Parse the meal into isolated items with objective, user-recognizable physical units (e.g. portion_unit: "slice", "piece", "bowl", "serving", "gram" and portion_value: 1.5, 2, 350) instead of subjective adjectives like "Large/Medium/Small".
           2. Do not assume or hardcode portion picker selections. Analyze the biggest volumetric or ingredient uncertainty in this specific plate and dynamically construct a calibration question and UI schema to let the user clarify this uncertainty.
-          3. Do not include subjective words in the picker choices. Options must represent strict objective scales (e.g., ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"], ["1 slice", "2 slices", "3 slices", "4+ slices"], ["Quarter", "Half", "Three-Quarter", "Whole"]).
+          3. Do not include subjective words in the picker choices. Options must represent strict objective scales (e.g., ["Half bowl", "1 bowl", "1.5 bowls", "2+ bowls"], ["1 slice", "2 slices", "3 slices", "4+ slices"], ["Quarter", "Half", "Three-Quarter", "Whole"]).
+          4. If the image does not contain food, a nutrition label, a menu, or food packaging, fail fast. Return JSON with no_food_detected: true, detected_items: [], estimates set to zero, one_question: null, and error: { "code": "NO_FOOD_DETECTED", "message": "No food detected." }.
+          5. Use eater-friendly units. For cut fruit such as mango/apple/banana slices, ask in slices, pieces, grams, or fraction of a whole fruit. Never ask fruit-slice portions in "cups" unless the image clearly shows a measuring cup.
+          6. If the image is food packaging, a nutrition label, or a barcode-only package image, do not mark it no_food_detected. Extract visible product/label information; if the barcode lookup is unavailable, treat it as a packaged-food label capture and ask for package fraction.
           
           DYNAMIC FORM UI DESIGN PARAMETERS:
           Match the "ui_type" directly to the food structure:
           - "slice_counter": For cut slices (e.g., pizza, pies, cakes). options: ["1 slice", "2 slices", "3 slices", "4+ slices"]
-          - "fraction_picker": For wholes, fractions, or halves (e.g. fruits, apples, bananas, sandwiches). options: ["Quarter", "Half", "Three-Quarter", "Whole"]
-          - "unit_slider": For grains, liquids, or mass servings (e.g. rice servings, soup bowls, oil spoons). options: ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"] or ["1 spoon", "2 spoons", "3+ spoons"]
+          - "fraction_picker": For wholes, fractions, or halves (e.g. fruits, apples, bananas, sandwiches, packages). options: ["Quarter", "Half", "Three-Quarter", "Whole"]
+          - "unit_slider": For grains, liquids, or mass servings (e.g. rice bowls, soup bowls, oil spoons). options: ["Half bowl", "1 bowl", "1.5 bowls", "2+ bowls"] or ["1 spoon", "2 spoons", "3+ spoons"]
           - "single_choice": Standard default discrete choices.
+          For mango or other sliced fruit, prefer options like ["2 pieces", "4 pieces", "6 pieces", "8+ pieces"] or ["Quarter mango", "Half mango", "Whole mango", "More than one"].
           
           Provide your output strictly in this JSON structure:
           {
             "meal_type": "breakfast" | "lunch" | "dinner" | "snack",
+            "no_food_detected": false,
             "detected_items": [
               {
                 "name_detected": "Kerala Matta Rice",
                 "name_normalized": "brown rice",
-                "portion_unit": "cup" | "slice" | "bowl" | "piece" | "gram",
+                  "portion_unit": "slice" | "bowl" | "piece" | "serving" | "gram",
                 "portion_value": 1.5,
                 "estimated_grams_likely": 300,
                 "confidence": "High" | "Medium" | "Low"
@@ -552,21 +768,20 @@ export default {
               "uncertainty_reasons": ["depth of plate", "coconut oil quantity in curry"]
             },
             "one_question": {
-              "id": "refine_rice_qty",
-              "question": "How many cups of Matta Rice did you serve?",
-              "options": ["0.5 cup", "1 cup", "1.5 cups", "2+ cups"],
-              "default_option": "1.5 cups",
+              "id": "refine_portion_qty",
+              "question": "Which portion is closest?",
+              "options": ["Half bowl", "1 bowl", "1.5 bowls", "2+ bowls"],
+              "default_option": "1 bowl",
               "correction_type": "portion",
               "ui_type": "unit_slider" | "slice_counter" | "fraction_picker" | "single_choice"
             }
           }
         `;
 
-        const selectedModel = model_name || "gemini-3.5-flash";
-        const gatewayUrl = `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.CF_GATEWAY_NAME}/google-ai-studio/v1beta/models/${selectedModel}:generateContent`;
+        const selectedModel = model_name || env.MODEL_NAME || "gemini-2.5-flash";
 
         const contentsParts = [
-          { text: systemPrompt },
+          { text: raw_text_note ? `${systemPrompt}\n\nUSER VOICE/TEXT NOTE:\n${raw_text_note}` : systemPrompt },
           { fileData: { fileUri: imageUri, mimeType: imageMime } }
         ];
 
@@ -575,26 +790,55 @@ export default {
           contentsParts.push({ fileData: { fileUri: audioUri, mimeType: audioMime } });
         }
 
-        const geminiResponse = await fetch(gatewayUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": env.GEMINI_API_KEY
-          },
-          body: JSON.stringify({
-            contents: [{ parts: contentsParts }],
-            generationConfig: { responseMimeType: "application/json" }
-          })
+        const geminiResponse = await generateGeminiContent(selectedModel, {
+          contents: [{ parts: contentsParts }],
+          generationConfig: { responseMimeType: "application/json" }
         });
 
         if (!geminiResponse.ok) {
           const errorText = await geminiResponse.text();
-          throw new Error(`Gemini Vision Parse Failed: ${geminiResponse.status} - ${errorText}`);
+          if ([429, 500, 502, 503, 504].includes(geminiResponse.status)) {
+            return new Response(
+              JSON.stringify({ error: "Analyzer temporarily busy", message: "Meal analysis is temporarily busy. Please try again." }),
+              { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          throw new Error(`Gemini Vision Parse Failed: ${geminiResponse.status} - ${errorText}; gateway ${geminiResponse.gatewayStatus || "not attempted"} - ${geminiResponse.gatewayError || "ok"}`);
         }
 
         const geminiData = await geminiResponse.json();
         const rawTextResult = geminiData.candidates[0].content.parts[0].text;
         const parsedVision = JSON.parse(rawTextResult.trim());
+        parsedVision.estimates = normalizeEstimates(parsedVision.estimates);
+
+        if (
+          parsedVision.no_food_detected === true ||
+          parsedVision.error?.code === "NO_FOOD_DETECTED" ||
+          !Array.isArray(parsedVision.detected_items) ||
+          parsedVision.detected_items.length === 0
+        ) {
+          if (tempImageName) {
+            try {
+              await fetch(`https://generativelanguage.googleapis.com/v1beta/${tempImageName}?key=${env.GEMINI_API_KEY}`, {
+                method: "DELETE"
+              });
+            } catch (_) {}
+          }
+          if (tempAudioName) {
+            try {
+              await fetch(`https://generativelanguage.googleapis.com/v1beta/${tempAudioName}?key=${env.GEMINI_API_KEY}`, {
+                method: "DELETE"
+              });
+            } catch (_) {}
+          }
+          return new Response(
+            JSON.stringify({
+              error: "No food detected",
+              message: parsedVision.error?.message || "No food detected. Take a clear photo of food or a nutrition label."
+            }),
+            { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
 
         // Secure file deletion hooks
         if (tempImageName) {
@@ -620,9 +864,11 @@ export default {
 
     } catch (error) {
       console.error("FATAL Ingestion Error:", error.message);
+      const status = error.status || 500;
+      const title = status === 502 ? "Photo unavailable" : "Ingestion pipeline failure";
       return new Response(
-        JSON.stringify({ error: "Ingestion pipeline failure", message: error.message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: title, message: error.message }),
+        { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
   }

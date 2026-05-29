@@ -28,8 +28,11 @@ DerivedData/
 *.mode1v3
 *.mode2v3
 *.perspectivev3
-xcshareddata/
 xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/xcshareddata/xcschemes/
+!*.xcodeproj/xcshareddata/xcschemes/*.xcscheme
 
 # Package manager dependencies
 .swiftpm/xcode/package.resolved

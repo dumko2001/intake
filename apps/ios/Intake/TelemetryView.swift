@@ -14,23 +14,65 @@ public struct TelemetryView: View {
     @State private var selectedDate: Date? = nil
     @State private var showingDayDetailSheet = false
     @State private var scalePressed = false
-    
-    // Top repeated foods telemetry
-    private let repeatedFoods = [
-        ("Kerala Matta Rice", 12, "400 kcal"),
-        ("Amma's Fish Curry", 9, "220 kcal"),
-        ("South Indian Filter Coffee", 8, "110 kcal"),
-        ("Home Dosa", 6, "130 kcal/pc"),
-        ("Egg Omelette", 5, "160 kcal")
-    ]
-    
-    // Standard insights engine mock
-    private let insights = [
-        ("Hidden Calorie Sources", "Rice serving sizes represent roughly 38% of your overall carbohydrate intake, averaging larger than your typical portion sizes.", "warning", "+140 kcal"),
-        ("Protein Inconsistency", "Your daily protein intake fell below your threshold of 65g on 8 out of the last 14 days, primarily due to low-protein dinners.", "warning", "Low consistency"),
-        ("Late Meal Calorie Spike", "You logged meals after 10:00 PM on 4 days. These meals averaged 210 calories higher with a 15% higher fat composition.", "info", "+210 kcal"),
-        ("Visual Log Success Rate", "82% of your logs this week included photos, preserving a highly detailed visual ledger for future re-calibrations.", "positive", "High confidence")
-    ]
+
+    private var repeatedFoods: [(String, Int, String)] {
+        var counts: [String: (count: Int, calories: Int)] = [:]
+        for event in viewModel.savedEvents {
+            let estimate = viewModel.savedEstimates[event.id]
+            for item in viewModel.savedItems[event.id] ?? [] {
+                let name = item.nameDetected.isEmpty ? item.nameNormalized : item.nameDetected
+                var current = counts[name] ?? (0, 0)
+                current.count += 1
+                current.calories += estimate?.caloriesLikely ?? 0
+                counts[name] = current
+            }
+        }
+
+        return counts
+            .map { name, value in
+                let avg = value.count == 0 ? 0 : value.calories / value.count
+                return (name, value.count, avg > 0 ? "\(avg) kcal avg" : "No estimate")
+            }
+            .sorted { $0.1 > $1.1 }
+            .prefix(5)
+            .map { $0 }
+    }
+
+    private var insights: [(String, String, String, String)] {
+        let rollups = Array(viewModel.dailyRollups.suffix(14))
+        guard !rollups.isEmpty else { return [] }
+
+        let totalEvents = rollups.reduce(0) { $0 + $1.eventsCount }
+        let totalPhotoLogs = rollups.reduce(0) { $0 + $1.photoLogsCount }
+        let averageConfidence = rollups.reduce(0) { $0 + $1.confidenceScore } / max(rollups.count, 1)
+        let lowProteinDays = rollups.filter { $0.proteinG > 0 && $0.proteinG < 65 }.count
+
+        var rows: [(String, String, String, String)] = []
+        if totalEvents > 0 {
+            let photoRate = Int((Double(totalPhotoLogs) / Double(totalEvents) * 100).rounded())
+            rows.append((
+                "Photo Log Rate",
+                "\(photoRate)% of saved meals include a photo.",
+                photoRate >= 70 ? "positive" : "info",
+                "\(photoRate)%"
+            ))
+        }
+        rows.append((
+            "Estimate Confidence",
+            "Your 14-day average confidence is \(averageConfidence)%.",
+            averageConfidence >= 80 ? "positive" : "warning",
+            "\(averageConfidence)%"
+        ))
+        if lowProteinDays > 0 {
+            rows.append((
+                "Protein Coverage",
+                "\(lowProteinDays) day\(lowProteinDays == 1 ? "" : "s") were below 65g protein.",
+                "warning",
+                "\(lowProteinDays) days"
+            ))
+        }
+        return rows
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -40,7 +82,7 @@ public struct TelemetryView: View {
                 VStack(spacing: 20) {
                     summaryStatisticsRow
                     
-                    dribbbleCalendarSection
+                    calendarSection
                     
                     barTelemetryChartSection
                     
@@ -60,6 +102,16 @@ public struct TelemetryView: View {
                     .presentationDragIndicator(.visible)
             }
         }
+        .gesture(
+            DragGesture(minimumDistance: 36)
+                .onEnded { value in
+                    if value.translation.width > 80 {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            viewModel.activeView = .camera
+                        }
+                    }
+                }
+        )
     }
     
     // MARK: - View Sub-Components
@@ -67,12 +119,12 @@ public struct TelemetryView: View {
     private var headerBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("TELEMETRY")
+                Text("RESULTS")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundColor(Color(hex: "ff6b35"))
                     .tracking(1.0)
                 
-                Text("Body Intake")
+                Text("Intake History")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
             }
@@ -84,18 +136,19 @@ public struct TelemetryView: View {
                     viewModel.activeView = .camera
                 }
             }) {
-                Text("Camera")
-                    .font(.system(size: 11, weight: .bold))
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+                    .frame(width: 44, height: 44)
+                    .intakeTouchTarget()
                     .background(Color.white.opacity(0.06))
-                    .cornerRadius(20)
+                    .cornerRadius(22)
                     .overlay(
                         RoundedRectangle(cornerRadius: 20)
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                     )
             }
+            .accessibilityLabel("Return to camera")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
@@ -115,7 +168,7 @@ public struct TelemetryView: View {
                     Image(systemName: "flame.fill")
                         .font(.system(size: 11))
                         .foregroundColor(Color(hex: "ff6b35"))
-                    Text("DAILY CALORIES")
+                Text("CALORIES / DAY")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundColor(Color(hex: "ff6b35"))
                 }
@@ -153,7 +206,7 @@ public struct TelemetryView: View {
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
                 
-                Text("Consistency: 82%")
+                Text("\(loggedDaysCount()) logged days")
                     .font(.system(size: 10))
                     .foregroundColor(Color(hex: "9ca3af"))
             }
@@ -168,56 +221,60 @@ public struct TelemetryView: View {
         }
     }
     
-    // MARK: - Dribbble-inspired 7 x 14 Telemetry Calendar Contribution Grid
-    
-    private var dribbbleCalendarSection: some View {
+    private var calendarSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 HStack(spacing: 4) {
                     Image(systemName: "circle.grid.3x3.fill")
                         .font(.system(size: 11))
                         .foregroundColor(Color(hex: "818cf8"))
-                    Text("14-DAY DRIBBBLE CALENDAR GRID")
+                    Text("14-DAY LOG CALENDAR")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundColor(Color(hex: "818cf8"))
                         .tracking(0.5)
                 }
                 Spacer()
                 
-                Text("Click cells for details")
+                Text("Tap a day")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundColor(.gray)
             }
             
-            // 7x14 Grid Layout representing 14 days chronologically
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 7), spacing: 8) {
-                ForEach(viewModel.dailyRollups.suffix(14), id: \.date) { rollup in
-                    Button(action: {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
-                            selectedDate = rollup.date
-                            showingDayDetailSheet = true
+            if viewModel.dailyRollups.isEmpty {
+                emptyState("No saved days yet.")
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 7), spacing: 8) {
+                    ForEach(viewModel.dailyRollups.suffix(14), id: \.date) { rollup in
+                        Button(action: {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+                                selectedDate = rollup.date
+                                showingDayDetailSheet = true
+                            }
+                        }) {
+                            Circle()
+                                .fill(calendarCellColor(for: rollup))
+                                .frame(height: 34)
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                )
+                                .shadow(color: calendarCellShadowColor(for: rollup), radius: 4)
+                                .overlay(
+                                    Text(getDayLabel(date: rollup.date))
+                                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                                        .foregroundColor(rollup.caloriesLikely > 0 ? .white : Color(hex: "6b7280"))
+                                )
                         }
-                    }) {
-                        Circle()
-                            .fill(calendarCellColor(for: rollup))
-                            .frame(height: 34)
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                            )
-                            .shadow(color: calendarCellShadowColor(for: rollup), radius: 4)
-                            .overlay(
-                                Text(getDayLabel(date: rollup.date))
-                                    .font(.system(size: 8, weight: .bold, design: .rounded))
-                                    .foregroundColor(rollup.caloriesLikely > 0 ? .white : Color(hex: "6b7280"))
-                            )
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel("Open log details for \(getDayLabel(date: rollup.date))")
+                        .buttonStyle(StaticScaleButtonStyle())
                     }
-                    .buttonStyle(StaticScaleButtonStyle())
                 }
+                .padding(8)
+                .background(Color.black.opacity(0.35))
+                .cornerRadius(18)
             }
-            .padding(8)
-            .background(Color.black.opacity(0.35))
-            .cornerRadius(18)
         }
         .padding(14)
         .background(Color.white.opacity(0.01))
@@ -234,41 +291,49 @@ public struct TelemetryView: View {
                 Image(systemName: "chart.bar.fill")
                     .font(.system(size: 11))
                     .foregroundColor(Color(hex: "ff6b35"))
-                Text("14-DAY OBSERVABILITY GRAPH")
+                Text("14-DAY CALORIES")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundColor(Color(hex: "ff6b35"))
             }
             
             HStack(alignment: .bottom, spacing: 8) {
-                ForEach(viewModel.dailyRollups.suffix(14), id: \.date) { rollup in
-                    VStack(spacing: 6) {
-                        let heightRatio = CGFloat(max(0, rollup.caloriesLikely)) / CGFloat(2800)
-                        let barHeight = max(10, min(100, 100 * heightRatio))
-                        
-                        ZStack(alignment: .bottom) {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.white.opacity(0.04))
-                                .frame(height: 100)
-                            
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(
-                                    LinearGradient(
-                                        gradient: Gradient(colors: [Color(hex: "ff6b35"), Color(hex: "ff8c42")]),
-                                        startPoint: .top,
-                                        endPoint: .bottom
+                if viewModel.dailyRollups.isEmpty {
+                    emptyState("Save meals to build this chart.")
+                } else {
+                    ForEach(viewModel.dailyRollups.suffix(14), id: \.date) { rollup in
+                        VStack(spacing: 6) {
+                            let heightRatio = CGFloat(max(0, rollup.caloriesLikely)) / CGFloat(2800)
+                            let barHeight = max(10, min(100, 100 * heightRatio))
+
+                            ZStack(alignment: .bottom) {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.white.opacity(0.04))
+                                    .frame(height: 100)
+
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(
+                                        LinearGradient(
+                                            gradient: Gradient(colors: [Color(hex: "ff6b35"), Color(hex: "ff8c42")]),
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        )
                                     )
-                                )
-                                .frame(height: barHeight)
+                                    .frame(height: barHeight)
+                            }
+
+                            Text(getDayLabel(date: rollup.date))
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundColor(Color(hex: "9ca3af"))
                         }
-                        
-                        Text(getDayLabel(date: rollup.date))
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundColor(Color(hex: "9ca3af"))
+                        .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
                 }
             }
             .frame(height: 120)
+
+            Text("kcal per saved day")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(Color(hex: "6b7280"))
         }
         .padding(14)
         .background(Color.white.opacity(0.01))
@@ -287,42 +352,46 @@ public struct TelemetryView: View {
                 .tracking(0.5)
             
             VStack(spacing: 8) {
-                ForEach(0..<repeatedFoods.count, id: \.self) { idx in
-                    let food = repeatedFoods[idx]
-                    HStack {
-                        HStack(spacing: 8) {
-                            Text("\(idx + 1)")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(Color(hex: "ff6b35"))
-                                .frame(width: 18, height: 18)
-                                .background(Color(hex: "ff6b35").opacity(0.1))
-                                .cornerRadius(9)
-                            
-                            Text(food.0)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.white)
+                if repeatedFoods.isEmpty {
+                    emptyState("No repeated foods yet.")
+                } else {
+                    ForEach(0..<repeatedFoods.count, id: \.self) { idx in
+                        let food = repeatedFoods[idx]
+                        HStack {
+                            HStack(spacing: 8) {
+                                Text("\(idx + 1)")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color(hex: "ff6b35"))
+                                    .frame(width: 18, height: 18)
+                                    .background(Color(hex: "ff6b35").opacity(0.1))
+                                    .cornerRadius(9)
+
+                                Text(food.0)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white)
+                            }
+
+                            Spacer()
+
+                            HStack(spacing: 8) {
+                                Text("\(food.1) logs")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(Color(hex: "9ca3af"))
+
+                                Text(food.2)
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(Color(hex: "9ca3af"))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.05))
+                                    .cornerRadius(6)
+                            }
                         }
-                        
-                        Spacer()
-                        
-                        HStack(spacing: 8) {
-                            Text("\(food.1) logs")
-                                .font(.system(size: 10))
-                                .foregroundColor(Color(hex: "9ca3af"))
-                            
-                            Text(food.2)
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(Color(hex: "9ca3af"))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.white.opacity(0.05))
-                                .cornerRadius(6)
+                        .padding(.bottom, 6)
+                        if idx < repeatedFoods.count - 1 {
+                            Divider()
+                                .background(Color.white.opacity(0.04))
                         }
-                    }
-                    .padding(.bottom, 6)
-                    if idx < repeatedFoods.count - 1 {
-                        Divider()
-                            .background(Color.white.opacity(0.04))
                     }
                 }
             }
@@ -344,44 +413,48 @@ public struct TelemetryView: View {
                 .tracking(0.5)
             
             VStack(spacing: 10) {
-                ForEach(0..<insights.count, id: \.self) { idx in
-                    let insight = insights[idx]
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: insight.2 == "warning" ? "exclamationmark.triangle.fill" : (insight.2 == "positive" ? "sparkles" : "clock.fill"))
-                            .foregroundColor(insight.2 == "warning" ? Color(hex: "f59e0b") : (insight.2 == "positive" ? Color(hex: "10b981") : Color(hex: "818cf8")))
-                            .font(.system(size: 14))
-                            .padding(.top, 2)
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(insight.0)
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.white)
-                                
-                                Spacer()
-                                
-                                Text(insight.3)
-                                    .font(.system(size: 8, weight: .bold, design: .rounded))
-                                    .foregroundColor(insight.2 == "warning" ? Color(hex: "f59e0b") : (insight.2 == "positive" ? Color(hex: "10b981") : Color(hex: "818cf8")))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.white.opacity(0.04))
-                                    .cornerRadius(6)
+                if insights.isEmpty {
+                    emptyState("Insights appear after saved meals.")
+                } else {
+                    ForEach(0..<insights.count, id: \.self) { idx in
+                        let insight = insights[idx]
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: insight.2 == "warning" ? "exclamationmark.triangle.fill" : (insight.2 == "positive" ? "sparkles" : "clock.fill"))
+                                .foregroundColor(insight.2 == "warning" ? Color(hex: "f59e0b") : (insight.2 == "positive" ? Color(hex: "10b981") : Color(hex: "818cf8")))
+                                .font(.system(size: 14))
+                                .padding(.top, 2)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text(insight.0)
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(.white)
+
+                                    Spacer()
+
+                                    Text(insight.3)
+                                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                                        .foregroundColor(insight.2 == "warning" ? Color(hex: "f59e0b") : (insight.2 == "positive" ? Color(hex: "10b981") : Color(hex: "818cf8")))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.white.opacity(0.04))
+                                        .cornerRadius(6)
+                                }
+
+                                Text(insight.1)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color(hex: "9ca3af"))
+                                    .lineSpacing(2)
                             }
-                            
-                            Text(insight.1)
-                                .font(.system(size: 11))
-                                .foregroundColor(Color(hex: "9ca3af"))
-                                .lineSpacing(2)
                         }
+                        .padding(12)
+                        .background(Color.white.opacity(0.01))
+                        .cornerRadius(16)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.white.opacity(0.03), lineWidth: 1)
+                        )
                     }
-                    .padding(12)
-                    .background(Color.white.opacity(0.01))
-                    .cornerRadius(16)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.white.opacity(0.03), lineWidth: 1)
-                    )
                 }
             }
         }
@@ -422,7 +495,7 @@ public struct TelemetryView: View {
                             .foregroundColor(.gray)
                             .padding(.top, 40)
                     } else {
-                        ForEach(logsForDay) { log in
+                        ForEach(logsForDay, id: \.id) { log in
                             HStack(spacing: 12) {
                                 // Image thumbnail if present
                                 if let url = log.thumbnailUrl {
@@ -442,8 +515,9 @@ public struct TelemetryView: View {
                                         Color.white.opacity(0.05)
                                             .frame(width: 44, height: 44)
                                             .cornerRadius(8)
-                                        Text("🎙️")
-                                            .font(.system(size: 14))
+                                        Image(systemName: "photo")
+                                            .font(.system(size: 15, weight: .semibold))
+                                            .foregroundColor(Color(hex: "9ca3af"))
                                     }
                                 }
                                 
@@ -488,19 +562,32 @@ public struct TelemetryView: View {
     }
     
     // MARK: - Telemetry Arithmetic Helpers
+
+    private func emptyState(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(Color(hex: "9ca3af"))
+            .frame(maxWidth: .infinity, minHeight: 60)
+            .background(Color.white.opacity(0.01))
+            .cornerRadius(12)
+    }
     
     private func dailyAverageCalories() -> Int {
         let rolled = viewModel.dailyRollups.suffix(14)
-        guard !rolled.isEmpty else { return 2340 }
+        guard !rolled.isEmpty else { return 0 }
         let total = rolled.reduce(0) { $0 + $1.caloriesLikely }
         return total / rolled.count
     }
     
     private func dailyAverageProtein() -> Int {
         let rolled = viewModel.dailyRollups.suffix(14)
-        guard !rolled.isEmpty else { return 58 }
+        guard !rolled.isEmpty else { return 0 }
         let total = rolled.reduce(0) { $0 + $1.proteinG }
         return total / rolled.count
+    }
+
+    private func loggedDaysCount() -> Int {
+        viewModel.dailyRollups.suffix(14).filter { $0.eventsCount > 0 }.count
     }
     
     private func getDayLabel(date: Date) -> String {

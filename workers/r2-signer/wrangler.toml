@@ -7,3 +7,7 @@ R2_ACCOUNT_ID = "57014886c6cd87ebacf23a94e56a6e0c"
 R2_BUCKET_NAME = "intake-media"
 CDN_DOMAIN = "intake-media.57014886c6cd87ebacf23a94e56a6e0c.r2.cloudflarestorage.com"
 # Note: Sensitive credentials like R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY will be set via wrangler secrets put
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "intake-media"

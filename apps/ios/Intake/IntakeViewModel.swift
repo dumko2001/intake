@@ -10,6 +10,7 @@ import Foundation
 import Observation
 import Combine
 import SwiftUI
+import Vision
 
 public enum AppActiveView {
     case camera
@@ -18,7 +19,6 @@ public enum AppActiveView {
     case telemetry
 }
 
-/// State-of-the-art Swift 6 / iOS 17+ Observable model using the @Observable macro
 @Observable
 @MainActor
 public final class IntakeViewModel {
@@ -46,7 +46,6 @@ public final class IntakeViewModel {
     public var processingError: String? = nil
     
     // Settings toggles
-    public var voiceAnnotationEnabled: Bool = true
     public var isOnline: Bool = true
     
     // Aggregated stats today
@@ -71,51 +70,58 @@ public final class IntakeViewModel {
         }
     }
     
-    // MARK: - Ingestion Pipeline (Stateless parsing via Edge Ingest API)
+    // MARK: - Ingestion Pipeline
     
     public func triggerCapture(flowId: String) {
+        triggerCapture(flowId: flowId, imageData: nil)
+    }
+
+    public func triggerCapture(flowId: String, imageData: Data?) {
+        triggerCapture(intent: CaptureIntent(legacyFlowId: flowId), imageData: imageData)
+    }
+
+    public func triggerCapture(
+        intent: CaptureIntent,
+        imageData: Data? = nil,
+        noteText: String? = nil,
+        mealType: MealType? = nil
+    ) {
         processingError = nil
+
+        let trimmedNote = noteText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if intent.requiresImage && imageData == nil {
+            processingError = "Add a photo before analyzing this meal."
+            return
+        }
+
         activeView = .analyzing
-        analysisStage = 1 // Media upload phase
+        analysisStage = 1
         
         let eventId = UUID()
         let userId = "usr_sidharth_902"
         let now = Date()
-        
-        var visualUrlString = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600"
-        var noteText: String? = nil
-        var captureType: CaptureType = .photo
-        var barcodeStr: String? = nil
-        
-        switch flowId {
-        case "kerala_lunch":
-            visualUrlString = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600"
-            noteText = voiceAnnotationEnabled ? "Lunch with Rice, fish curry, thoran, pappadam" : nil
-            captureType = voiceAnnotationEnabled ? .photoVoice : .photo
-        case "banana_chips":
-            visualUrlString = "https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=600"
-            noteText = "Snacking on packaged chips at desk"
-            captureType = .photo
-            barcodeStr = "8901539200212" // standard mock barcode trigger
-        case "dosa_backfill":
-            visualUrlString = "https://images.unsplash.com/photo-1668236543090-82eba5ee5976?w=600"
-            noteText = "Dosas with coconut chutney, filter coffee"
-            captureType = .backfillVoice
-        default:
-            break
-        }
+        let resolvedMealType = mealType ?? intent.defaultMealType
+        let resolvedNote: String? = {
+            if let trimmedNote, !trimmedNote.isEmpty {
+                return trimmedNote
+            }
+            if intent == .packageLabel {
+                return "Packaged food label photo"
+            }
+            return nil
+        }()
         
         let newEvent = FoodEvent(
             id: eventId,
             userId: userId,
             createdAt: now,
             mealTime: getFormattedTime(date: now),
-            mealType: flowId == "banana_chips" ? .snack : (flowId == "dosa_backfill" ? .breakfast : .lunch),
-            captureType: captureType,
+            mealType: resolvedMealType,
+            captureType: intent.captureType,
             status: .pending,
-            rawTextNote: noteText,
-            primaryImageUrl: URL(string: visualUrlString),
-            thumbnailUrl: URL(string: visualUrlString)
+            rawTextNote: resolvedNote,
+            primaryImageUrl: nil,
+            thumbnailUrl: nil
         )
         
         self.activeEvent = newEvent
@@ -127,68 +133,102 @@ public final class IntakeViewModel {
                     saveMealOffline(event: newEvent)
                     return
                 }
-                
-                // 1. Request R2 Upload Presigned URL
-                let signerRequest = try createSignerRequest(eventId: eventId, mimeType: "image/jpeg")
-                let (signerData, signerRes) = try await URLSession.shared.data(for: signerRequest)
-                
-                guard (signerRes as? HTTPURLResponse)?.statusCode == 200 else {
-                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 upload authorization rejected"])
-                }
-                
-                let signerPayload = try JSONDecoder().decode(SignerResponse.self, from: signerData)
-                
-                // 2. Fetch raw visual binary and upload to R2
-                guard let assetUrl = URL(string: visualUrlString) else {
-                    throw NSError(domain: "Intake", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid asset source URL"])
-                }
-                let (imageData, _) = try await URLSession.shared.data(from: assetUrl)
-                
-                var uploadRequest = URLRequest(url: URL(string: signerPayload.upload_url)!)
-                uploadRequest.httpMethod = "PUT"
-                uploadRequest.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
-                uploadRequest.httpBody = imageData
-                
-                let (_, uploadRes) = try await URLSession.shared.data(for: uploadRequest)
-                guard (uploadRes as? HTTPURLResponse)?.statusCode == 200 else {
-                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "R2 direct upload streaming failed"])
-                }
-                
-                // 3. Handle optional simulated audio recording upload
-                var r2AudioUrl: String? = nil
-                if voiceAnnotationEnabled && flowId == "kerala_lunch" {
-                    let mockAudioText = "This is Kerala Matta Rice, about 1.5 cups, with standard fish curry and Thoran."
-                    let mockAudioData = mockAudioText.data(using: .utf8)!
-                    
-                    let audSignerReq = try createSignerRequest(eventId: eventId, mimeType: "audio/mp4")
-                    let (audSignerData, _) = try await URLSession.shared.data(for: audSignerReq)
-                    let audSignerPayload = try JSONDecoder().decode(SignerResponse.self, from: audSignerData)
-                    
-                    var audUploadReq = URLRequest(url: URL(string: audSignerPayload.upload_url)!)
-                    audUploadReq.httpMethod = "PUT"
-                    audUploadReq.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
-                    audUploadReq.httpBody = mockAudioData
-                    
-                    let (_, audUploadRes) = try await URLSession.shared.data(for: audUploadReq)
-                    if (audUploadRes as? HTTPURLResponse)?.statusCode == 200 {
-                        r2AudioUrl = audSignerPayload.public_url
+
+                var uploadedImageUrl: String?
+                var uploadedR2Key: String?
+                var detectedBarcode: String?
+                var barcodeAnalysis: BarcodeAnalysis?
+                if let imageData {
+                    if intent == .packageLabel {
+                        detectedBarcode = await detectBarcodePayload(in: imageData)
+                        if let detectedBarcode {
+                            barcodeAnalysis = await lookupBarcodeProduct(detectedBarcode)
+                        }
                     }
+
+                    let signerRequest = try createSignerRequest(eventId: eventId, mimeType: "image/jpeg")
+                    let (signerData, signerRes) = try await URLSession.shared.data(for: signerRequest)
+
+                    guard (signerRes as? HTTPURLResponse)?.statusCode == 200 else {
+                        throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "Photo upload authorization failed"])
+                    }
+
+                    let signerPayload = try JSONDecoder().decode(SignerResponse.self, from: signerData)
+
+                    var uploadRequest = URLRequest(url: URL(string: signerPayload.upload_url)!)
+                    uploadRequest.httpMethod = "PUT"
+                    uploadRequest.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+                    uploadRequest.httpBody = imageData
+
+                    let (_, uploadRes) = try await URLSession.shared.data(for: uploadRequest)
+                    guard (uploadRes as? HTTPURLResponse)?.statusCode == 200 else {
+                        throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "Photo upload failed"])
+                    }
+
+                    uploadedImageUrl = signerPayload.public_url
+                    uploadedR2Key = signerPayload.r2_key
+                    newEvent.primaryImageUrl = URL(string: signerPayload.public_url)
+                    newEvent.thumbnailUrl = URL(string: signerPayload.public_url)
                 }
                 
-                self.analysisStage = 2 // Running multimodal edge parsing
+                self.analysisStage = 2
+
+                if let barcodeAnalysis {
+                    newEvent.status = .needsReview
+                    newEvent.rawTextNote = "Barcode: \(barcodeAnalysis.productName)"
+                    self.activeItems = [
+                        MealItem(
+                            eventId: eventId,
+                            nameDetected: barcodeAnalysis.productName,
+                            nameNormalized: barcodeAnalysis.genericName,
+                            portionUnit: barcodeAnalysis.portionUnit,
+                            portionValue: barcodeAnalysis.portionValue,
+                            estimatedGramsLikely: barcodeAnalysis.estimatedGrams,
+                            confidence: "High"
+                        )
+                    ]
+                    self.activeEstimate = EstimateVersion(
+                        eventId: eventId,
+                        modelProvider: "open-food-facts",
+                        modelName: "barcode",
+                        promptVersion: "barcode-v1",
+                        nutritionEngineVersion: "off-v1",
+                        caloriesLow: max(0, Int(Double(barcodeAnalysis.calories) * 0.9)),
+                        caloriesHigh: Int(Double(barcodeAnalysis.calories) * 1.1),
+                        caloriesLikely: barcodeAnalysis.calories,
+                        proteinG: barcodeAnalysis.proteinG,
+                        carbsG: barcodeAnalysis.carbsG,
+                        fatG: barcodeAnalysis.fatG,
+                        fiberG: barcodeAnalysis.fiberG,
+                        confidenceScore: 96,
+                        uncertaintyReasons: barcodeAnalysis.warnings
+                    )
+                    self.activeQuestion = PortionQuestion(
+                        id: "refine_barcode_qty",
+                        question: "How much did you eat?",
+                        options: ["Quarter pack", "Half pack", "Whole pack", "More than one"],
+                        defaultOption: "Whole pack",
+                        correctionType: "portion",
+                        uiType: "fraction_picker"
+                    )
+                    self.selectedCorrectionOption = "Whole pack"
+                    try await Task.sleep(nanoseconds: 350_000_000)
+                    self.activeView = .review
+                    return
+                }
                 
-                // 4. Hit Edge Stateless Ingest Endpoint (Does NOT write to D1!)
                 let ingestPayload = IngestRequest(
                     event_id: eventId.uuidString,
                     user_id: userId,
-                    image_url: signerPayload.public_url,
-                    audio_url: r2AudioUrl,
-                    model_name: "gemini-3.5-flash",
+                    image_url: uploadedImageUrl,
+                    r2_key: uploadedR2Key,
+                    audio_url: nil,
+                    model_name: "gemini-2.5-flash",
                     meal_time: getFormattedTime(date: now),
-                    meal_type: newEvent.mealType.rawValue,
-                    capture_type: captureType.rawValue,
-                    raw_text_note: noteText,
-                    barcode: barcodeStr
+                    meal_type: resolvedMealType.rawValue,
+                    capture_type: intent.captureType.rawValue,
+                    raw_text_note: resolvedNote,
+                    barcode: detectedBarcode
                 )
                 
                 var ingestRequest = URLRequest(url: analyzerUrl.appendingPathComponent("api/ingest"))
@@ -198,13 +238,19 @@ public final class IntakeViewModel {
                 ingestRequest.httpBody = try JSONEncoder().encode(ingestPayload)
                 
                 let (ingestData, ingestRes) = try await URLSession.shared.data(for: ingestRequest)
-                guard (ingestRes as? HTTPURLResponse)?.statusCode == 200 else {
-                    let errStr = String(data: ingestData, encoding: .utf8) ?? "Ingestion pipeline returned rejection code"
-                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: errStr])
+                let ingestStatus = (ingestRes as? HTTPURLResponse)?.statusCode ?? 500
+                guard ingestStatus == 200 else {
+                    throw NSError(
+                        domain: "Intake",
+                        code: ingestStatus,
+                        userInfo: [NSLocalizedDescriptionKey: userFacingAPIError(data: ingestData, statusCode: ingestStatus)]
+                    )
                 }
                 
-                self.analysisStage = 3 // Standard UI calibration
+                self.analysisStage = 3
                 let analysis = try JSONDecoder().decode(IngestResponse.self, from: ingestData)
+                newEvent.mealType = MealType(rawValue: analysis.meal_type) ?? resolvedMealType
+                newEvent.status = .needsReview
                 
                 self.activeItems = analysis.detected_items.map { item in
                     MealItem(
@@ -221,7 +267,7 @@ public final class IntakeViewModel {
                 self.activeEstimate = EstimateVersion(
                     eventId: eventId,
                     modelProvider: "google-ai",
-                    modelName: "gemini-3.5-flash",
+                    modelName: "gemini-2.5-flash",
                     promptVersion: "v2.2",
                     nutritionEngineVersion: "vision-v1",
                     caloriesLow: analysis.estimates.calories_low,
@@ -237,9 +283,7 @@ public final class IntakeViewModel {
                 
                 self.activeQuestion = analysis.one_question
                 self.selectedCorrectionOption = analysis.one_question?.defaultOption ?? ""
-                
-                newEvent.primaryImageUrl = URL(string: signerPayload.public_url)
-                
+
                 try await Task.sleep(nanoseconds: 500_000_000)
                 self.activeView = .review
                 
@@ -330,10 +374,10 @@ public final class IntakeViewModel {
     
     public func saveMeal() {
         guard let event = activeEvent, let estimate = activeEstimate else { return }
+        processingError = nil
         
         Task {
             do {
-                // Compile transaction payload for `/api/save`
                 let transaction = SaveTransactionRequest(
                     event_id: event.id.uuidString,
                     user_id: event.userId,
@@ -373,15 +417,14 @@ public final class IntakeViewModel {
                 
                 let (_, res) = try await URLSession.shared.data(for: req)
                 guard (res as? HTTPURLResponse)?.statusCode == 200 else {
-                    print("Edge database transaction save rejected")
-                    return
+                    throw NSError(domain: "Intake", code: 500, userInfo: [NSLocalizedDescriptionKey: "Save failed. Please try again."])
                 }
                 
-                // Commit locally
                 event.status = .saved
                 savedEvents.insert(event, at: 0)
                 savedItems[event.id] = activeItems
                 savedEstimates[event.id] = estimate
+                mergeSavedEventIntoLocalRollups(event: event, estimate: estimate)
                 
                 await fetchTelemetry()
                 
@@ -394,7 +437,8 @@ public final class IntakeViewModel {
                 }
                 
             } catch {
-                print("TRANSACTION COMMITTED FAILS:", error.localizedDescription)
+                self.processingError = error.localizedDescription
+                print("SAVE FAILED:", error.localizedDescription)
             }
         }
     }
@@ -540,9 +584,170 @@ public final class IntakeViewModel {
         req.httpBody = try JSONEncoder().encode(payload)
         return req
     }
+
+    private func detectBarcodePayload(in imageData: Data) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            let request = VNDetectBarcodesRequest()
+            request.symbologies = [
+                .ean8,
+                .ean13,
+                .upce,
+                .code128,
+                .qr,
+                .dataMatrix,
+                .pdf417
+            ]
+
+            let handler = VNImageRequestHandler(data: imageData, options: [:])
+            try? handler.perform([request])
+            return request.results?
+                .compactMap { $0.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }
+        }.value
+    }
+
+    private func lookupBarcodeProduct(_ barcode: String) async -> BarcodeAnalysis? {
+        let encodedBarcode = barcode.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? barcode
+        let urls = [
+            "https://api.openfoodfacts.org/api/v2/product/\(encodedBarcode)",
+            "https://ssl-api.openfoodfacts.org/api/v2/product/\(encodedBarcode)",
+            "https://world.openfoodfacts.org/api/v2/product/\(encodedBarcode)"
+        ].compactMap(URL.init(string:))
+
+        for url in urls {
+            do {
+                var request = URLRequest(url: url)
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.setValue("Intake iOS/1.0", forHTTPHeaderField: "User-Agent")
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
+                guard
+                    let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    (root["status"] as? Int) == 1,
+                    let product = root["product"] as? [String: Any]
+                else { continue }
+
+                let nutriments = product["nutriments"] as? [String: Any] ?? [:]
+                let name = nonEmptyString(product["product_name"]) ?? nonEmptyString(product["generic_name"]) ?? "Packaged food"
+                let generic = nonEmptyString(product["generic_name"]) ?? name
+                let servingSize = nonEmptyString(product["serving_size"]) ?? "serving"
+                let servingGrams = numberValue(product["serving_quantity"]) ?? 100
+                let calories = Int((numberValue(nutriments["energy-kcal_serving"]) ?? numberValue(nutriments["energy-kcal_100g"]) ?? 120).rounded())
+                let protein = Int((numberValue(nutriments["proteins_serving"]) ?? numberValue(nutriments["proteins_100g"]) ?? 0).rounded())
+                let carbs = Int((numberValue(nutriments["carbohydrates_serving"]) ?? numberValue(nutriments["carbohydrates_100g"]) ?? 0).rounded())
+                let fat = Int((numberValue(nutriments["fat_serving"]) ?? numberValue(nutriments["fat_100g"]) ?? 0).rounded())
+                let fiber = Int((numberValue(nutriments["fiber_serving"]) ?? numberValue(nutriments["fiber_100g"]) ?? 0).rounded())
+
+                var warnings: [String] = []
+                if let allergens = nonEmptyString(product["allergens_from_ingredients"]) {
+                    warnings.append("Allergens: \(allergens)")
+                }
+                if let additives = product["additives_tags"] as? [Any], additives.count > 3 {
+                    warnings.append("High additive count")
+                }
+
+                return BarcodeAnalysis(
+                    productName: name,
+                    genericName: generic,
+                    portionUnit: servingSize == "serving" ? "serving" : servingSize,
+                    portionValue: 1,
+                    estimatedGrams: Int(servingGrams.rounded()),
+                    calories: calories,
+                    proteinG: protein,
+                    carbsG: carbs,
+                    fatG: fat,
+                    fiberG: fiber,
+                    warnings: warnings
+                )
+            } catch {
+                continue
+            }
+        }
+
+        return nil
+    }
+
+    private func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func numberValue(_ value: Any?) -> Double? {
+        if let double = value as? Double {
+            return double
+        }
+        if let int = value as? Int {
+            return Double(int)
+        }
+        if let string = value as? String {
+            return Double(string)
+        }
+        return nil
+    }
+
+    private func mergeSavedEventIntoLocalRollups(event: FoodEvent, estimate: EstimateVersion) {
+        guard Calendar.current.isDateInToday(event.createdAt) else { return }
+
+        todayRollup.caloriesLow += estimate.caloriesLow
+        todayRollup.caloriesHigh += estimate.caloriesHigh
+        todayRollup.caloriesLikely += estimate.caloriesLikely
+        todayRollup.proteinG += estimate.proteinG
+        todayRollup.carbsG += estimate.carbsG
+        todayRollup.fatG += estimate.fatG
+        todayRollup.eventsCount += 1
+        todayRollup.photoLogsCount += event.primaryImageUrl == nil ? 0 : 1
+        todayRollup.noImageLogsCount += event.primaryImageUrl == nil ? 1 : 0
+        todayRollup.confidenceScore = estimate.confidenceScore
+
+        if let index = dailyRollups.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: event.createdAt) }) {
+            dailyRollups[index] = todayRollup
+        } else {
+            dailyRollups.append(todayRollup)
+        }
+    }
+
+    private func userFacingAPIError(data: Data, statusCode: Int) -> String {
+        let decodedError = try? JSONDecoder().decode(APIErrorResponse.self, from: data)
+        let rawMessage = [decodedError?.message, decodedError?.error]
+            .compactMap { $0 }
+            .first { !$0.isEmpty }
+        let lowercased = rawMessage?.lowercased() ?? ""
+
+        if statusCode == 422 || lowercased.contains("no food") {
+            return "No food detected. Take a clear photo of food or a nutrition label."
+        }
+        if lowercased.contains("fetch image") || lowercased.contains("image url") || lowercased.contains("not readable") {
+            return "The uploaded photo could not be read. Please retake it or choose another photo."
+        }
+        if statusCode == 401 {
+            return "The app is not authorized to analyze meals right now."
+        }
+        if statusCode == 503 || lowercased.contains("temporarily busy") || lowercased.contains("high demand") {
+            return "Meal analysis is temporarily busy. Please try again."
+        }
+        if let rawMessage, !rawMessage.isEmpty {
+            return rawMessage
+        }
+        return "Meal analysis failed. Please try again."
+    }
 }
 
 // MARK: - Save SQL Transaction Request Contract
+
+private struct BarcodeAnalysis {
+    let productName: String
+    let genericName: String
+    let portionUnit: String
+    let portionValue: Double
+    let estimatedGrams: Int
+    let calories: Int
+    let proteinG: Int
+    let carbsG: Int
+    let fatG: Int
+    let fiberG: Int
+    let warnings: [String]
+}
 
 struct SaveTransactionRequest: Codable {
     let event_id: String

@@ -6,11 +6,16 @@ compatibility_flags = [ "nodejs_compat" ]
 [vars]
 CF_ACCOUNT_ID = "57014886c6cd87ebacf23a94e56a6e0c"
 CF_GATEWAY_NAME = "intake-ai-gateway"
-MODEL_NAME = "gemini-3.5-flash"
+MODEL_NAME = "gemini-2.5-flash"
+MEDIA_WORKER_DOMAIN = "r2-signer.tallyup-invoices.workers.dev"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "intake-db"
 database_id = "c6633e20-fb98-47c0-8bbb-f946a2456ba4" # Provisioned in Cloudflare account
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "intake-media"
 
 # Sensitive secrets like GEMINI_API_KEY will be set via wrangler secrets put

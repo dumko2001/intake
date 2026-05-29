@@ -11,7 +11,6 @@ import SwiftData
 
 @main
 struct IntakeApp: App {
-    // Modern iOS 17+ SwiftData local model container
     @State private var viewModel = IntakeViewModel()
 
     var body: some Scene {
@@ -38,9 +37,8 @@ struct IntakeApp: App {
                         .transition(.opacity)
                 }
             }
-            .statusBar(hidden: true)
+            .intakeStatusBarHidden()
             .preferredColorScheme(.dark)
-            // Injecting SwiftData model container context natively
             .modelContainer(for: [
                 FoodEvent.self,
                 MealItem.self,
@@ -77,19 +75,19 @@ struct IntakeApp: App {
             }
             
             VStack(spacing: 8) {
-                Text("Analyzing Meal...")
+                Text("Analyzing Meal")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
-                Text("AI is processing raw ingestion tags")
+                Text("Estimating ingredients and portions")
                     .font(.system(size: 11))
                     .foregroundColor(Color(hex: "9ca3af"))
             }
             
             VStack(alignment: .leading, spacing: 16) {
                 ForEach([
-                    (1, "Stage 1: Vision Parsing", "Isolating ingredients & plate structures"),
-                    (2, "Stage 2: Regional Priors", "Applying culinary calibration weights"),
-                    (3, "Stage 3: Personal Memory Calibration", "Adapting to recurring portion metrics")
+                    (1, "Uploading Photo", "Sending the selected image"),
+                    (2, "Estimating Nutrition", "Reading ingredients and portions"),
+                    (3, "Preparing Review", "Building the correction question")
                 ], id: \.0) { step in
                     let isActive = viewModel.analysisStage == step.0
                     let isCompleted = viewModel.analysisStage > step.0
@@ -182,5 +180,33 @@ extension Color {
             blue: Double(b) / 255,
             opacity: Double(a) / 255
         )
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func intakeStatusBarHidden() -> some View {
+        #if os(iOS)
+        self.statusBar(hidden: true)
+        #else
+        self
+        #endif
+    }
+
+    func intakeTouchTarget(_ size: CGFloat = 44) -> some View {
+        frame(minWidth: size, minHeight: size)
+            .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    func intakeGlassPanel(cornerRadius: CGFloat, fallbackColor: Color = Color(hex: "101216").opacity(0.82)) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            self.glassEffect(.regular.interactive(false), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            self.background(
+                fallbackColor,
+                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        }
     }
 }

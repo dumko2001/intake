@@ -20,13 +20,12 @@ public struct ReviewView: View {
                     if let _ = viewModel.activeEvent?.primaryImageUrl {
                         capturedImageHeader
                     } else {
-                        backfillHeaderMock
+                        noPhotoHeader
                     }
                     
                     VStack(spacing: 20) {
                         calorieEstimateRangeBlock
                         
-                        // Sleek check button: Hidden by default, tap to open the full Visual Ingredient Layer
                         checkIngredientsButton
                         
                         if let question = viewModel.activeQuestion {
@@ -83,25 +82,25 @@ public struct ReviewView: View {
         }
     }
     
-    private var backfillHeaderMock: some View {
+    private var noPhotoHeader: some View {
         HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(Color(hex: "f43f5e"))
+            Image(systemName: "photo.badge.exclamationmark")
+                .foregroundColor(Color(hex: "10b981"))
                 .font(.system(size: 16))
             
-            Text("BACKFILL LOG (NO IMAGE / LOW CONFIDENCE)")
+            Text("NO PHOTO")
                 .font(.system(size: 10, weight: .black, design: .rounded))
-                .foregroundColor(Color(hex: "f43f5e"))
+                .foregroundColor(Color(hex: "10b981"))
                 .tracking(0.5)
             
             Spacer()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Color(hex: "f43f5e").opacity(0.06))
+        .background(Color(hex: "10b981").opacity(0.06))
         .overlay(
             Rectangle()
-                .fill(Color(hex: "f43f5e").opacity(0.15))
+                .fill(Color(hex: "10b981").opacity(0.15))
                 .frame(height: 1),
             alignment: .bottom
         )
@@ -109,7 +108,7 @@ public struct ReviewView: View {
     
     private var calorieEstimateRangeBlock: some View {
         VStack(spacing: 8) {
-            Text("CALORIE ESTIMATE RANGE")
+            Text("CALORIE RANGE")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .foregroundColor(Color(hex: "9ca3af"))
                 .tracking(0.8)
@@ -178,11 +177,11 @@ public struct ReviewView: View {
             }
         }) {
             HStack(spacing: 10) {
-                Image(systemName: "sparkles")
+                    Image(systemName: "list.bullet.clipboard")
                     .foregroundColor(Color(hex: "10b981"))
                     .font(.system(size: 14, weight: .bold))
                 
-                Text("Check Ingredients & Additives")
+                Text("Review Detected Items")
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
                 
@@ -194,6 +193,7 @@ public struct ReviewView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
+            .frame(minHeight: 44)
             .background(Color.white.opacity(0.02))
             .cornerRadius(16)
             .overlay(
@@ -201,19 +201,18 @@ public struct ReviewView: View {
                     .stroke(Color.white.opacity(0.05), lineWidth: 1)
             )
         }
+        .accessibilityLabel("Review detected items")
     }
-    
-    // MARK: - Decoupled Visual Ingredient Layer Sheet (Allergens, Warnings, Clean score)
     
     private var visualIngredientLayerSheet: some View {
         VStack(spacing: 0) {
             VStack(spacing: 6) {
-                Text("INGREDIENTS observatory")
+                Text("INGREDIENTS")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundColor(Color(hex: "10b981"))
                     .tracking(1.0)
                 
-                Text("Culinary Telemetry Analysis")
+                Text("Detected Items")
                     .font(.system(size: 18, weight: .black, design: .rounded))
                     .foregroundColor(.white)
             }
@@ -225,7 +224,6 @@ public struct ReviewView: View {
             
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 16) {
-                    // 1. Warnings Card: High-contrast red/rose container for allergens, sugars, trans fats
                     let warningReasons = viewModel.activeEstimate?.uncertaintyReasons.filter { 
                         $0.lowercased().contains("warning") || $0.lowercased().contains("allergens") || $0.lowercased().contains("additive") || $0.lowercased().contains("oil")
                     } ?? []
@@ -264,15 +262,14 @@ public struct ReviewView: View {
                         )
                     }
                     
-                    // 2. Clean Ingredients Pills in Soft Emerald Tags
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("CLEAN INGREDIENTS LIST")
+                        Text("DETECTED ITEMS")
                             .font(.system(size: 9, weight: .bold, design: .rounded))
                             .foregroundColor(Color(hex: "9ca3af"))
                             .tracking(0.5)
                         
-                        FlowLayout(spacing: 8) {
-                            ForEach(viewModel.activeItems) { item in
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], alignment: .leading, spacing: 8) {
+                            ForEach(viewModel.activeItems, id: \.id) { item in
                                 HStack(spacing: 4) {
                                     Circle()
                                         .fill(Color(hex: "10b981"))
@@ -366,6 +363,7 @@ public struct ReviewView: View {
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
+                    .frame(minHeight: 44)
                     .background(Color.white.opacity(0.06))
                     .cornerRadius(14)
                     .overlay(
@@ -374,6 +372,7 @@ public struct ReviewView: View {
                     )
             }
             .frame(maxWidth: .infinity)
+            .accessibilityLabel("Dismiss meal")
             
             Button(action: {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
@@ -389,6 +388,7 @@ public struct ReviewView: View {
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
+                .frame(minHeight: 44)
                 .background(
                     LinearGradient(
                         gradient: Gradient(colors: [Color(hex: "10b981"), Color(hex: "059669")]),
@@ -398,7 +398,8 @@ public struct ReviewView: View {
                 )
                 .cornerRadius(14)
             }
-            .frame(maxWidth: 2 * .infinity)
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel("Save meal")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -410,59 +411,5 @@ public struct ReviewView: View {
                 .frame(height: 1),
             alignment: .top
         )
-    }
-}
-
-// MARK: - FlowLayout SwiftUI Helper
-struct FlowLayout: View {
-    let spacing: CGFloat
-    let content: [AnyView]
-    
-    init<Views: Sequence>(spacing: CGFloat = 8, @ViewBuilder content: () -> Views) where Views.Element == AnyView {
-        self.spacing = spacing
-        self.content = Array(content())
-    }
-    
-    init<Data: RandomAccessCollection, Content: View>(
-        _ data: Data,
-        spacing: CGFloat = 8,
-        @ViewBuilder content: @escaping (Data.Element) -> Content
-    ) {
-        self.spacing = spacing
-        self.content = data.map { AnyView(content($0)) }
-    }
-    
-    var body: some View {
-        var width = CGFloat.zero
-        var height = CGFloat.zero
-        
-        return GeometryReader { geo in
-            ZStack(alignment: .topLeading) {
-                ForEach(0..<content.count, id: \.self) { idx in
-                    content[idx]
-                        .alignmentGuide(.leading) { d in
-                            if abs(width - d.width) > geo.size.width {
-                                width = 0
-                                height -= d.height + spacing
-                            }
-                            let result = width
-                            if idx == content.count - 1 {
-                                width = 0 // last item
-                            } else {
-                                width -= d.width + spacing
-                            }
-                            return result
-                        }
-                        .alignmentGuide(.top) { _ in
-                            let result = height
-                            if idx == content.count - 1 {
-                                height = 0 // last item
-                            }
-                            return result
-                        }
-                }
-            }
-        }
-        .frame(minHeight: 120)
     }
 }

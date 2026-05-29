@@ -17,6 +17,37 @@ public enum CaptureType: String, Codable {
     case backfillVoice = "backfill_voice"
 }
 
+public enum CaptureIntent: String, Codable, Hashable {
+    case mealPhoto = "meal_photo"
+    case packageLabel = "package_label"
+
+    public init(legacyFlowId: String) {
+        switch legacyFlowId {
+        case "package_label":
+            self = .packageLabel
+        default:
+            self = .mealPhoto
+        }
+    }
+
+    public var requiresImage: Bool {
+        true
+    }
+
+    public var defaultMealType: MealType {
+        switch self {
+        case .mealPhoto:
+            return .defaultForCurrentTime()
+        case .packageLabel:
+            return .snack
+        }
+    }
+
+    public var captureType: CaptureType {
+        .photo
+    }
+}
+
 /// Represents the current server synchronization and parsing status
 public enum EventStatus: String, Codable {
     case pending = "pending"
@@ -26,12 +57,207 @@ public enum EventStatus: String, Codable {
     case failed = "failed"
 }
 
+public enum HealthGoal: String, Codable, CaseIterable, Identifiable {
+    case maintain
+    case lose
+    case gain
+    case recomp
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .maintain: return "Maintain"
+        case .lose: return "Lose"
+        case .gain: return "Gain"
+        case .recomp: return "Recomp"
+        }
+    }
+
+    public var dailyCalorieAdjustment: Int {
+        switch self {
+        case .maintain: return 0
+        case .lose: return -350
+        case .gain: return 300
+        case .recomp: return -100
+        }
+    }
+}
+
+public enum ActivityLevel: String, Codable, CaseIterable, Identifiable {
+    case low
+    case moderate
+    case high
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .low: return "Light"
+        case .moderate: return "Moderate"
+        case .high: return "Active"
+        }
+    }
+
+    public var multiplier: Double {
+        switch self {
+        case .low: return 1.35
+        case .moderate: return 1.55
+        case .high: return 1.75
+        }
+    }
+}
+
+public enum IntakeSex: String, Codable, CaseIterable, Identifiable {
+    case female
+    case male
+    case unspecified
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .female: return "Female"
+        case .male: return "Male"
+        case .unspecified: return "Skip"
+        }
+    }
+}
+
+public struct NutritionTarget: Codable, Hashable {
+    public var effectiveFrom: Date
+    public var caloriesKcal: Int
+    public var proteinG: Int
+    public var carbsG: Int
+    public var fatG: Int
+
+    public init(
+        effectiveFrom: Date = Date(),
+        caloriesKcal: Int,
+        proteinG: Int,
+        carbsG: Int,
+        fatG: Int
+    ) {
+        self.effectiveFrom = effectiveFrom
+        self.caloriesKcal = caloriesKcal
+        self.proteinG = proteinG
+        self.carbsG = carbsG
+        self.fatG = fatG
+    }
+
+    public var macroCalories: Int {
+        proteinG * 4 + carbsG * 4 + fatG * 9
+    }
+
+    public var isMacroBalanced: Bool {
+        abs(macroCalories - caloriesKcal) <= 25
+    }
+
+    public func rebalanced(calories: Int? = nil, protein: Int? = nil, fatPercentOfRemaining: Double = 0.35) -> NutritionTarget {
+        let resolvedCalories = max(900, min(5200, calories ?? caloriesKcal))
+        let resolvedProtein = max(35, min(260, protein ?? proteinG))
+        let remainingCalories = max(160, resolvedCalories - resolvedProtein * 4)
+        let fatCalories = Double(remainingCalories) * fatPercentOfRemaining
+        let resolvedFat = max(20, Int((fatCalories / 9).rounded()))
+        let carbsCalories = max(0, resolvedCalories - resolvedProtein * 4 - resolvedFat * 9)
+        let resolvedCarbs = max(0, Int((Double(carbsCalories) / 4).rounded()))
+
+        return NutritionTarget(
+            effectiveFrom: Date(),
+            caloriesKcal: resolvedCalories,
+            proteinG: resolvedProtein,
+            carbsG: resolvedCarbs,
+            fatG: resolvedFat
+        )
+    }
+
+    public func adjustedForAdvancedMacro(protein: Int? = nil, carbs: Int? = nil, fat: Int? = nil) -> NutritionTarget {
+        let resolvedProtein = max(35, min(260, protein ?? proteinG))
+        let resolvedCarbs = max(0, min(650, carbs ?? carbsG))
+        let resolvedFat = max(20, min(230, fat ?? fatG))
+        return NutritionTarget(
+            effectiveFrom: Date(),
+            caloriesKcal: resolvedProtein * 4 + resolvedCarbs * 4 + resolvedFat * 9,
+            proteinG: resolvedProtein,
+            carbsG: resolvedCarbs,
+            fatG: resolvedFat
+        )
+    }
+}
+
+public struct UserProfile: Codable, Hashable {
+    public var userId: String
+    public var completedOnboarding: Bool
+    public var currentWeightKg: Double
+    public var heightCm: Double
+    public var age: Int
+    public var sex: IntakeSex
+    public var goal: HealthGoal
+    public var activityLevel: ActivityLevel
+    public var target: NutritionTarget
+    public var updatedAt: Date
+
+    public init(
+        userId: String,
+        completedOnboarding: Bool = false,
+        currentWeightKg: Double,
+        heightCm: Double,
+        age: Int,
+        sex: IntakeSex = .unspecified,
+        goal: HealthGoal,
+        activityLevel: ActivityLevel,
+        target: NutritionTarget,
+        updatedAt: Date = Date()
+    ) {
+        self.userId = userId
+        self.completedOnboarding = completedOnboarding
+        self.currentWeightKg = currentWeightKg
+        self.heightCm = heightCm
+        self.age = age
+        self.sex = sex
+        self.goal = goal
+        self.activityLevel = activityLevel
+        self.target = target
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct WeightLog: Codable, Hashable, Identifiable {
+    public var id: UUID
+    public var userId: String
+    public var loggedAt: Date
+    public var weightKg: Double
+
+    public init(id: UUID = UUID(), userId: String, loggedAt: Date = Date(), weightKg: Double) {
+        self.id = id
+        self.userId = userId
+        self.loggedAt = loggedAt
+        self.weightKg = weightKg
+    }
+}
+
 /// Represents the meal type classifications
 public enum MealType: String, Codable {
     case breakfast = "breakfast"
     case lunch = "lunch"
     case dinner = "dinner"
     case snack = "snack"
+
+    public static func defaultForCurrentTime(_ date: Date = Date(), calendar: Calendar = .current) -> MealType {
+        let hour = calendar.component(.hour, from: date)
+        switch hour {
+        case 5..<11:
+            return .breakfast
+        case 11..<16:
+            return .lunch
+        case 16..<18:
+            return .snack
+        case 18..<23:
+            return .dinner
+        default:
+            return .snack
+        }
+    }
 }
 
 /// Core immutable meal logging event record persistently managed via SwiftData
@@ -305,5 +531,14 @@ public struct PortionQuestion: Codable, Hashable {
         self.defaultOption = defaultOption
         self.correctionType = correctionType
         self.uiType = uiType
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case question
+        case options
+        case defaultOption = "default_option"
+        case correctionType = "correction_type"
+        case uiType = "ui_type"
     }
 }
